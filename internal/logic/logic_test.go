@@ -13,6 +13,7 @@ import (
 	"github.com/antonio-alexander/go-blog-cache/internal/data"
 	"github.com/antonio-alexander/go-blog-cache/internal/logic"
 	"github.com/antonio-alexander/go-blog-cache/internal/sql"
+	"github.com/antonio-alexander/go-blog-cache/internal/utilities"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -33,6 +34,8 @@ var (
 		"REDIS_TIMEOUT": "10",
 		//logic
 		"LOGIC_CACHE_ENABLED": "true",
+		//logger
+		"LOGGING_LEVEL": "TRACE",
 	}
 )
 
@@ -45,26 +48,29 @@ func init() {
 }
 
 type logicTest struct {
-	sql   *sql.Sql
-	cache cache.Cache
-	*logic.Logic
+	sql    *sql.Sql
+	cache  cache.Cache
+	logger utilities.Logger
+	logic.Logic
 }
 
 func newLogicTest(cacheType string) *logicTest {
 	var c cache.Cache
 
 	sql := sql.NewSql()
+	logger := utilities.NewLogger()
 	switch cacheType {
 	case "memory":
-		c = cache.NewMemory()
+		c = cache.NewMemory(logger)
 	case "redis":
-		c = cache.NewRedis()
+		c = cache.NewRedis(logger)
 	}
-	logic := logic.NewLogic(sql, c)
+	logic := logic.NewLogic(sql, c, logger)
 	return &logicTest{
-		sql:   sql,
-		cache: c,
-		Logic: logic,
+		sql:    sql,
+		cache:  c,
+		logger: logger,
+		Logic:  logic,
 	}
 }
 
@@ -75,40 +81,46 @@ func (l *logicTest) Configure(envs map[string]string) error {
 	if err := l.cache.Configure(envs); err != nil {
 		return err
 	}
+	if err := l.logger.Configure(envs); err != nil {
+		return err
+	}
 	if err := l.Logic.Configure(envs); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (l *logicTest) Open() error {
-	if err := l.sql.Open(); err != nil {
+func (l *logicTest) Open(correlationId string) error {
+	if err := l.sql.Open(correlationId); err != nil {
 		return err
 	}
-	if err := l.cache.Open(); err != nil {
+	if err := l.cache.Open(correlationId); err != nil {
 		return err
 	}
-	if err := l.Logic.Open(); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (l *logicTest) Close() error {
-	if err := l.sql.Close(); err != nil {
-		return err
-	}
-	if err := l.cache.Close(); err != nil {
-		return err
-	}
-	if err := l.Logic.Close(); err != nil {
+	if err := l.Logic.Open(correlationId); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (l *logicTest) TestLogic(cacheEnabled bool) func(t *testing.T) {
+func (l *logicTest) Close(correlationId string) error {
+	if err := l.sql.Close(correlationId); err != nil {
+		return err
+	}
+	if err := l.cache.Close(correlationId); err != nil {
+		return err
+	}
+	if err := l.Logic.Close(correlationId); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (l *logicTest) testLogic(cacheEnabled bool) func(t *testing.T) {
 	return func(t *testing.T) {
+		//generate correlationId string
+		correlationId := internal.GenerateId()
+
 		// generate context
 		ctx := context.TODO()
 
@@ -117,36 +129,37 @@ func (l *logicTest) TestLogic(cacheEnabled bool) func(t *testing.T) {
 		firstName := internal.GenerateId()[:14]
 		lastName := internal.GenerateId()[:16]
 		gender := "M"
-		employeeCreated, err := l.EmployeeCreate(ctx, data.EmployeePartial{
-			BirthDate: &birthDate,
-			FirstName: &firstName,
-			LastName:  &lastName,
-			HireDate:  &hireDate,
-			Gender:    &gender,
-		})
+		employeeCreated, err := l.EmployeeCreate(correlationId, ctx,
+			data.EmployeePartial{
+				BirthDate: &birthDate,
+				FirstName: &firstName,
+				LastName:  &lastName,
+				HireDate:  &hireDate,
+				Gender:    &gender,
+			})
 		assert.Nil(t, err)
 		assert.NotNil(t, employeeCreated)
 		empNo := employeeCreated.EmpNo
 		defer func(empNo int64) {
-			_ = l.EmployeeDelete(ctx, empNo)
+			_ = l.EmployeeDelete(correlationId, ctx, empNo)
 		}(empNo)
 
 		if cacheEnabled {
 			// validate that employee not in cache
-			employeeCached, err := l.cache.EmployeeRead(ctx, empNo)
+			employeeCached, err := l.cache.EmployeeRead(correlationId, ctx, empNo)
 			assert.NotNil(t, err)
 			assert.Nil(t, employeeCached)
 		}
 
 		// read employee
-		employeeRead, err := l.EmployeeRead(ctx, empNo)
+		employeeRead, err := l.EmployeeRead(correlationId, ctx, empNo)
 		assert.Nil(t, err)
 		assert.NotNil(t, employeeRead)
 		assert.Equal(t, employeeCreated, employeeRead)
 
 		// validate that employee in cache
 		if cacheEnabled {
-			employeeCached, err := l.cache.EmployeeRead(ctx, empNo)
+			employeeCached, err := l.cache.EmployeeRead(correlationId, ctx, empNo)
 			assert.Nil(t, err)
 			assert.NotNil(t, employeeCached)
 			assert.Equal(t, employeeCreated, employeeCached)
@@ -155,41 +168,42 @@ func (l *logicTest) TestLogic(cacheEnabled bool) func(t *testing.T) {
 		// update employee
 		updatedFirstName := internal.GenerateId()[:14]
 		updatedLastName := internal.GenerateId()[:16]
-		employeeUpdated, err := l.EmployeeUpdate(ctx, empNo, data.EmployeePartial{
-			FirstName: &updatedFirstName,
-			LastName:  &updatedLastName,
-		})
+		employeeUpdated, err := l.EmployeeUpdate(correlationId, ctx, empNo,
+			data.EmployeePartial{
+				FirstName: &updatedFirstName,
+				LastName:  &updatedLastName,
+			})
 		assert.Nil(t, err)
 		assert.NotNil(t, employeeUpdated)
 
 		// validate that employee not in cache
 		if cacheEnabled {
-			employeeCached, err := l.cache.EmployeeRead(ctx, empNo)
+			employeeCached, err := l.cache.EmployeeRead(correlationId, ctx, empNo)
 			assert.NotNil(t, err)
 			assert.Nil(t, employeeCached)
 		}
 
 		// read employee
-		employeeRead, err = l.EmployeeRead(ctx, empNo)
+		employeeRead, err = l.EmployeeRead(correlationId, ctx, empNo)
 		assert.Nil(t, err)
 		assert.NotNil(t, employeeRead)
 		assert.Equal(t, employeeUpdated, employeeRead)
 
 		// validate that employee in cache
 		if cacheEnabled {
-			employeeCached, err := l.cache.EmployeeRead(ctx, empNo)
+			employeeCached, err := l.cache.EmployeeRead(correlationId, ctx, empNo)
 			assert.Nil(t, err)
 			assert.NotNil(t, employeeCached)
 			assert.Equal(t, employeeUpdated, employeeCached)
 		}
 
 		// delete employee
-		err = l.EmployeeDelete(ctx, empNo)
+		err = l.EmployeeDelete(correlationId, ctx, empNo)
 		assert.Nil(t, err)
 
 		if cacheEnabled {
 			// validate that employee not in cache
-			employeeCached, err := l.cache.EmployeeRead(ctx, empNo)
+			employeeCached, err := l.cache.EmployeeRead(correlationId, ctx, empNo)
 			assert.NotNil(t, err)
 			assert.Nil(t, employeeCached)
 		}
@@ -197,6 +211,7 @@ func (l *logicTest) TestLogic(cacheEnabled bool) func(t *testing.T) {
 }
 
 func testLogic(t *testing.T, cacheType string) {
+	const correlationId string = "test_logic"
 	c := newLogicTest(cacheType)
 
 	cacheEnabled, _ := strconv.ParseBool(envs["LOGIC_CACHE_ENABLED"])
@@ -204,16 +219,16 @@ func testLogic(t *testing.T, cacheType string) {
 	if !assert.Nil(t, err) {
 		assert.FailNow(t, "unable to configure testLogic")
 	}
-	err = c.Open()
+	err = c.Open(correlationId)
 	if !assert.Nil(t, err) {
 		assert.FailNow(t, "unable to open testLogic")
 	}
 	defer func() {
-		if err := c.Close(); err != nil {
+		if err := c.Close(correlationId); err != nil {
 			t.Logf("error while closing testLogic: %s", err)
 		}
 	}()
-	t.Run("Logic", c.TestLogic(cacheEnabled))
+	t.Run("Logic", c.testLogic(cacheEnabled))
 }
 
 func TestLogicMemory(t *testing.T) {

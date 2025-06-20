@@ -13,6 +13,7 @@ import (
 
 	"github.com/antonio-alexander/go-blog-cache/internal/data"
 	"github.com/antonio-alexander/go-blog-cache/internal/logic"
+	"github.com/antonio-alexander/go-blog-cache/internal/utilities"
 
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
@@ -42,7 +43,9 @@ type Service struct {
 	context.Context
 	*mux.Router
 	*http.Server
-	*logic.Logic
+	logic.Logic
+	utilities.Logger
+	utilities.Timers
 	cancel context.CancelFunc
 	config struct {
 		address          string
@@ -51,6 +54,7 @@ type Service struct {
 		shutdownTimeout  time.Duration
 		allowedOrigins   []string
 		allowedMethods   []string
+		allowedHeaders   []string
 		allowCredentials bool
 		corsDisabled     bool
 		corsDebug        bool
@@ -67,14 +71,18 @@ func NewService(parameters ...interface{}) *Service {
 	}
 	for _, parameter := range parameters {
 		switch p := parameter.(type) {
-		case *logic.Logic:
+		case logic.Logic:
 			s.Logic = p
+		case utilities.Logger:
+			s.Logger = p
+		case utilities.Timers:
+			s.Timers = p
 		}
 	}
 	return s
 }
 
-func (s *Service) launchServer() error {
+func (s *Service) launchServer(correlationId string) error {
 	started := make(chan struct{})
 	chErr := make(chan error, 1)
 	s.Add(1)
@@ -87,8 +95,11 @@ func (s *Service) launchServer() error {
 				AllowedOrigins:   s.config.allowedOrigins,
 				AllowCredentials: s.config.allowCredentials,
 				AllowedMethods:   s.config.allowedMethods,
+				AllowedHeaders:   s.config.allowedHeaders,
 				Debug:            s.config.corsDebug,
 			}).Handler(s.Router)
+		} else {
+			s.Debug(correlationId, "CORS disabled")
 		}
 		close(started)
 		if err := s.Server.ListenAndServe(); err != nil {
@@ -103,7 +114,7 @@ func (s *Service) launchServer() error {
 		// the port being already used
 		return err
 	case <-time.After(time.Second):
-		fmt.Printf("started server: %s:%s\n", s.config.address, s.config.port)
+		s.Debug(correlationId, "started server: %s:%s\n", s.config.address, s.config.port)
 		return nil
 	}
 }
@@ -123,6 +134,13 @@ func (s *Service) endpointEmployeeCreate(writer http.ResponseWriter, request *ht
 	var employeeRequest data.Request
 
 	ctx := request.Context()
+	correlationId := getCorrelationId(request)
+	timerIndex := s.Start("employee_create")
+	defer func() {
+		elapsedtime := s.Stop("employee_create", timerIndex)
+		s.Trace(correlationId, "employee_create took %v",
+			time.Duration(elapsedtime)*time.Nanosecond)
+	}()
 	bytes, err := io.ReadAll(request.Body)
 	defer request.Body.Close()
 	if err != nil {
@@ -133,7 +151,7 @@ func (s *Service) endpointEmployeeCreate(writer http.ResponseWriter, request *ht
 		handleResponse(writer, err, nil)
 		return
 	}
-	employee, err := s.EmployeeCreate(ctx, employeeRequest.EmployeePartial)
+	employee, err := s.EmployeeCreate(correlationId, ctx, employeeRequest.EmployeePartial)
 	if err != nil {
 		handleResponse(writer, err, nil)
 		return
@@ -141,17 +159,24 @@ func (s *Service) endpointEmployeeCreate(writer http.ResponseWriter, request *ht
 	handleResponse(writer, nil, &data.Response{
 		Employee: employee,
 	})
-	fmt.Printf("created employee: %d\n", employee.EmpNo)
+	s.Debug(correlationId, "created employee: %d\n", employee.EmpNo)
 }
 
 func (s *Service) endpointEmployeeRead(writer http.ResponseWriter, request *http.Request) {
+	correlationId := getCorrelationId(request)
+	timerIndex := s.Start("employee_read")
+	defer func() {
+		elapsedtime := s.Stop("employee_read", timerIndex)
+		s.Trace(correlationId, "employee_read took %v",
+			time.Duration(elapsedtime)*time.Nanosecond)
+	}()
 	ctx := request.Context()
 	empNo, err := empNoFromPath(mux.Vars(request))
 	if err != nil {
 		handleResponse(writer, err, nil)
 		return
 	}
-	employee, err := s.EmployeeRead(ctx, empNo)
+	employee, err := s.EmployeeRead(correlationId, ctx, empNo)
 	if err != nil {
 		handleResponse(writer, err, nil)
 		return
@@ -159,19 +184,26 @@ func (s *Service) endpointEmployeeRead(writer http.ResponseWriter, request *http
 	handleResponse(writer, nil, &data.Response{
 		Employee: employee,
 	})
-	fmt.Printf("read employee: %d\n", employee.EmpNo)
+	s.Debug(correlationId, "read employee: %d\n", employee.EmpNo)
 }
 
 func (s *Service) endpointEmployeesSearch(writer http.ResponseWriter, request *http.Request) {
 	var search data.EmployeeSearch
 
+	correlationId := getCorrelationId(request)
 	ctx := request.Context()
+	timerIndex := s.Start("employees_search")
+	defer func() {
+		elapsedtime := s.Stop("employees_search", timerIndex)
+		s.Trace(correlationId, "employees_search took %v",
+			time.Duration(elapsedtime)*time.Nanosecond)
+	}()
 	if err := request.ParseForm(); err != nil {
 		handleResponse(writer, err, nil)
 		return
 	}
 	search.FromParams(request.Form)
-	employees, err := s.EmployeesSearch(ctx, search)
+	employees, err := s.EmployeesSearch(correlationId, ctx, search)
 	if err != nil {
 		handleResponse(writer, err)
 		return
@@ -179,13 +211,20 @@ func (s *Service) endpointEmployeesSearch(writer http.ResponseWriter, request *h
 	handleResponse(writer, nil, &data.Response{
 		Employees: employees,
 	})
-	fmt.Printf("read employees\n")
+	s.Debug(correlationId, "read employees\n")
 }
 
 func (s *Service) endpointEmployeeUpdate(writer http.ResponseWriter, request *http.Request) {
 	var employeeRequest data.Request
 
+	correlationId := getCorrelationId(request)
 	ctx := request.Context()
+	timerIndex := s.Start("employee_update")
+	defer func() {
+		elapsedtime := s.Stop("employee_update", timerIndex)
+		s.Trace(correlationId, "employee_update took %v",
+			time.Duration(elapsedtime)*time.Nanosecond)
+	}()
 	empNo, err := empNoFromPath(mux.Vars(request))
 	if err != nil {
 		handleResponse(writer, err, nil)
@@ -201,7 +240,7 @@ func (s *Service) endpointEmployeeUpdate(writer http.ResponseWriter, request *ht
 		handleResponse(writer, err, nil)
 		return
 	}
-	employee, err := s.EmployeeUpdate(ctx, empNo, employeeRequest.EmployeePartial)
+	employee, err := s.EmployeeUpdate(correlationId, ctx, empNo, employeeRequest.EmployeePartial)
 	if err != nil {
 		handleResponse(writer, err, nil)
 		return
@@ -209,22 +248,29 @@ func (s *Service) endpointEmployeeUpdate(writer http.ResponseWriter, request *ht
 	handleResponse(writer, nil, &data.Response{
 		Employee: employee,
 	})
-	fmt.Printf("updated employee: %d\n", employee.EmpNo)
+	s.Debug(correlationId, "updated employee: %d\n", employee.EmpNo)
 }
 
 func (s *Service) endpointEmployeeDelete(writer http.ResponseWriter, request *http.Request) {
+	correlationId := getCorrelationId(request)
 	ctx := request.Context()
+	timerIndex := s.Start("employee_delete")
+	defer func() {
+		elapsedtime := s.Stop("employee_delete", timerIndex)
+		s.Trace(correlationId, "employee_delete took %v",
+			time.Duration(elapsedtime)*time.Nanosecond)
+	}()
 	empNo, err := empNoFromPath(mux.Vars(request))
 	if err != nil {
 		handleResponse(writer, err, nil)
 		return
 	}
-	if err := s.EmployeeDelete(ctx, empNo); err != nil {
+	if err := s.EmployeeDelete(correlationId, ctx, empNo); err != nil {
 		handleResponse(writer, err, nil)
 		return
 	}
 	handleResponse(writer, nil, nil)
-	fmt.Printf("deleted employee: %d\n", empNo)
+	s.Debug(correlationId, "deleted employee: %d\n", empNo)
 }
 
 func (s *Service) buildRoutes() {
@@ -271,6 +317,9 @@ func (s *Service) Configure(envs map[string]string) error {
 			s.config.allowCredentials = allowCredentials
 		}
 	}
+	if allowedHeaders, ok := envs["SERVICE_CORS_ALLOWED_HEADERS"]; ok {
+		s.config.allowedHeaders = strings.Split(allowedHeaders, ",")
+	}
 	if allowedOrigins, ok := envs["SERVICE_CORS_ALLOWED_ORIGINS"]; ok {
 		s.config.allowedOrigins = strings.Split(allowedOrigins, ",")
 	}
@@ -290,27 +339,27 @@ func (s *Service) Configure(envs map[string]string) error {
 	return nil
 }
 
-func (s *Service) Open() error {
+func (s *Service) Open(correlationId string) error {
 	s.Lock()
 	defer s.Unlock()
 
 	s.Context, s.cancel = context.WithCancel(context.Background())
 	s.Server.Addr = fmt.Sprintf("%s:%s", s.config.address, s.config.port)
 	s.buildRoutes()
-	if err := s.launchServer(); err != nil {
+	if err := s.launchServer(correlationId); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (s *Service) Close() error {
+func (s *Service) Close(correlationId string) error {
 	s.Lock()
 	defer s.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.config.shutdownTimeout)
 	defer cancel()
 	if err := s.Server.Shutdown(ctx); err != nil {
-		fmt.Printf("error while shutting down the server: %s\n", err)
+		s.Error(correlationId, "error while shutting down the server: %s", err)
 	}
 	s.cancel()
 	s.Wait()

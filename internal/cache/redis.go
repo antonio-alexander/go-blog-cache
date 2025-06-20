@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/antonio-alexander/go-blog-cache/internal/data"
+	"github.com/antonio-alexander/go-blog-cache/internal/utilities"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -22,6 +23,8 @@ const (
 type redisCache struct {
 	sync.RWMutex
 	sync.WaitGroup
+	utilities.Logger
+	utilities.CacheCounter
 	ctx         context.Context
 	cancel      context.CancelFunc
 	redisClient *redis.Client
@@ -37,7 +40,16 @@ type redisCache struct {
 }
 
 func NewRedis(parameters ...interface{}) Cache {
-	return &redisCache{}
+	c := &redisCache{}
+	for _, p := range parameters {
+		switch p := p.(type) {
+		case utilities.CacheCounter:
+			c.CacheCounter = p
+		case utilities.Logger:
+			c.Logger = p
+		}
+	}
+	return c
 }
 
 func (c *redisCache) toRedisOptions() *redis.Options {
@@ -50,6 +62,50 @@ func (c *redisCache) toRedisOptions() *redis.Options {
 		Password: c.config.Password,
 		DB:       c.config.Database,
 	}
+}
+
+func (c *redisCache) Error(correlationId, format string, v ...interface{}) {
+	if c.Logger != nil {
+		c.Logger.Error(correlationId, format, v...)
+	}
+}
+
+func (c *redisCache) Trace(correlationId, format string, v ...interface{}) {
+	if c.Logger != nil {
+		c.Logger.Trace(correlationId, format, v...)
+	}
+}
+
+func (c *redisCache) IncrementHit(item any) (hitCount int) {
+	if c.CacheCounter != nil {
+		var key interface{}
+		switch v := item.(type) {
+		default:
+			key = item
+		case string:
+			key = fmt.Sprintf("employee_search_%s", v)
+		case int64:
+			key = fmt.Sprintf("employee_%d", v)
+		}
+		return c.CacheCounter.IncrementHit(key)
+	}
+	return -1
+}
+
+func (c *redisCache) IncrementMiss(item any) (hitCount int) {
+	if c.CacheCounter != nil {
+		var key interface{}
+		switch v := item.(type) {
+		default:
+			key = item
+		case string:
+			key = fmt.Sprintf("employee_search_%s", v)
+		case int64:
+			key = fmt.Sprintf("employee_%d", v)
+		}
+		return c.CacheCounter.IncrementMiss(key)
+	}
+	return -1
 }
 
 func (c *redisCache) Configure(envs map[string]string) error {
@@ -74,7 +130,7 @@ func (c *redisCache) Configure(envs map[string]string) error {
 	return nil
 }
 
-func (c *redisCache) Open() error {
+func (c *redisCache) Open(correlationId string) error {
 	c.Lock()
 	defer c.Unlock()
 
@@ -88,20 +144,20 @@ func (c *redisCache) Open() error {
 	return nil
 }
 
-func (c *redisCache) Close() error {
+func (c *redisCache) Close(correlationId string) error {
 	c.Lock()
 	defer c.Unlock()
 
 	c.cancel()
 	c.Wait()
 	if err := c.redisClient.Close(); err != nil {
-		fmt.Printf("error while shutting down redis client: %s\n", err)
+		c.Error(correlationId, "error while shutting down redis client: %s\n", err)
 	}
 	c.initialized = false
 	return nil
 }
 
-func (c *redisCache) Clear(ctx context.Context) error {
+func (c *redisCache) Clear(correlationId string, ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, c.config.Timeout)
 	defer cancel()
 	//clear employees
@@ -125,26 +181,73 @@ func (c *redisCache) Clear(ctx context.Context) error {
 	return nil
 }
 
-func (c *redisCache) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error) {
+func (c *redisCache) EmployeeRead(correlationId string, ctx context.Context, empNo int64) (*data.Employee, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.config.Timeout)
 	defer cancel()
 	value, err := c.redisClient.HGet(ctx, hashKeyEmployees, fmt.Sprint(empNo)).Result()
 	if err != nil {
+		c.Trace(correlationId, "cache miss for employee: %d", empNo)
+		c.IncrementMiss(empNo)
 		return nil, err
 	}
 	employee := &data.Employee{}
 	if err := employee.UnmarshalBinary([]byte(value)); err != nil {
+		c.Trace(correlationId, "cache miss for employee: %d", empNo)
+		c.IncrementMiss(empNo)
 		return nil, err
 	}
+	c.IncrementHit(empNo)
+	c.Trace(correlationId, "cache hit for employee: %d", empNo)
 	return employee, nil
 }
 
-func (c *redisCache) EmployeesWrite(ctx context.Context, search data.EmployeeSearch, employees ...*data.Employee) error {
+func (c *redisCache) EmployeesRead(correlationId string, ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.config.Timeout)
+	defer cancel()
+	//generate search key
+	searchKey, err := searchToKey(search)
+	if err != nil {
+		return nil, err
+	}
+	// check if search key exists
+	value, err := c.redisClient.HGet(ctx, hashKeySearch, searchKey).Result()
+	if err != nil {
+		c.IncrementMiss(searchKey)
+		return nil, err
+	}
+	if searchKey == "" || value == "" {
+		c.IncrementMiss(search)
+		c.Trace(correlationId, "cache miss for employee search: %s", searchKey)
+		return nil, errors.New("search not cached")
+	}
+	//get employees
+	empNos := strings.Split(value, ",")
+	employees := make([]*data.Employee, 0, len(empNos))
+	for _, empNo := range empNos {
+		value, err := c.redisClient.HGet(ctx, hashKeyEmployees, fmt.Sprint(empNo)).Result()
+		if err != nil {
+			c.IncrementMiss(search)
+			return nil, err
+		}
+		employee := &data.Employee{}
+		if err := employee.UnmarshalBinary([]byte(value)); err != nil {
+			c.IncrementMiss(search)
+			return nil, err
+		}
+		employees = append(employees, employee)
+	}
+	c.Trace(correlationId, "cache hit for employee search: %s", searchKey)
+	c.IncrementHit(searchKey)
+	return employees, nil
+}
+
+func (c *redisCache) EmployeesWrite(correlationId string, ctx context.Context, search data.EmployeeSearch, employees ...*data.Employee) error {
 	ctx, cancel := context.WithTimeout(ctx, c.config.Timeout)
 	defer cancel()
 	//cache search
 	searchKey, err := searchToKey(search)
 	if err != nil {
+		c.Error(correlationId, "error while creating search key: %s", err)
 		return err
 	}
 	empNos := make([]string, 0, len(employees))
@@ -158,6 +261,7 @@ func (c *redisCache) EmployeesWrite(ctx context.Context, search data.EmployeeSea
 			fmt.Sprint(employee.EmpNo), string(bytes)).Result(); err != nil {
 			return err
 		}
+		c.Trace(correlationId, "cached employee: %d", employee.EmpNo)
 		empNos = append(empNos, fmt.Sprint(employee.EmpNo))
 	}
 	//cache search employees
@@ -165,48 +269,18 @@ func (c *redisCache) EmployeesWrite(ctx context.Context, search data.EmployeeSea
 		strings.Join(empNos, ",")).Result(); err != nil {
 		return err
 	}
+	c.Trace(correlationId, "cached employees search: %s", searchKey)
 	return nil
 }
 
-func (c *redisCache) EmployeesRead(ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error) {
-	ctx, cancel := context.WithTimeout(ctx, c.config.Timeout)
-	defer cancel()
-	//generate search key
-	searchKey, err := searchToKey(search)
-	if err != nil {
-		return nil, err
-	}
-	// check if search key exists
-	value, err := c.redisClient.HGet(ctx, hashKeySearch, searchKey).Result()
-	if err != nil {
-		return nil, err
-	}
-	if searchKey == "" || value == "" {
-		return nil, errors.New("search not cached")
-	}
-	//get employees
-	empNos := strings.Split(value, ",")
-	employees := make([]*data.Employee, 0, len(empNos))
-	for _, empNo := range empNos {
-		value, err := c.redisClient.HGet(ctx, hashKeyEmployees, fmt.Sprint(empNo)).Result()
-		if err != nil {
-			return nil, err
-		}
-		employee := &data.Employee{}
-		if err := employee.UnmarshalBinary([]byte(value)); err != nil {
-			return nil, err
-		}
-		employees = append(employees, employee)
-	}
-	return employees, nil
-}
-
-func (c *redisCache) EmployeesDelete(ctx context.Context, empNos ...int64) error {
+func (c *redisCache) EmployeesDelete(correlationId string, ctx context.Context, empNos ...int64) error {
 	for _, empNo := range empNos {
 		if _, err := c.redisClient.HDel(ctx, hashKeyEmployees,
 			fmt.Sprint(empNo)).Result(); err != nil {
+			c.Error(correlationId, "error while invalidating cached employee: %s", err)
 			return err
 		}
+		c.Trace(correlationId, "invalided cached employee: %d", empNo)
 	}
 	return nil
 }

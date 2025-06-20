@@ -46,7 +46,7 @@ func init() {
 
 type clientTest struct {
 	cache cache.Cache
-	*client.Client
+	client.Client
 }
 
 func newClientTest(cacheType string) *clientTest {
@@ -77,20 +77,22 @@ func (c *clientTest) Configure(envs map[string]string) error {
 }
 
 func (c *clientTest) Open() error {
-	if err := c.cache.Open(); err != nil {
+	correlationId := "client_test"
+	if err := c.cache.Open(correlationId); err != nil {
 		return err
 	}
-	if err := c.Client.Open(); err != nil {
+	if err := c.Client.Open(correlationId); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (c *clientTest) Close() error {
-	if err := c.cache.Close(); err != nil {
+	correlationId := "client_test"
+	if err := c.cache.Close(correlationId); err != nil {
 		return err
 	}
-	if err := c.Client.Close(); err != nil {
+	if err := c.Client.Close(correlationId); err != nil {
 		return err
 	}
 	return nil
@@ -98,6 +100,11 @@ func (c *clientTest) Close() error {
 
 func (c *clientTest) TestClient(cacheDisabled bool) func(t *testing.T) {
 	return func(t *testing.T) {
+
+		//generate correlationId
+		correlationId := internal.GenerateId()
+		t.Logf("correlation id: %s", correlationId)
+
 		// generate context
 		ctx := context.TODO()
 
@@ -106,7 +113,7 @@ func (c *clientTest) TestClient(cacheDisabled bool) func(t *testing.T) {
 		firstName := internal.GenerateId()[:14]
 		lastName := internal.GenerateId()[:16]
 		gender := "M"
-		employeeCreated, err := c.EmployeeCreate(ctx, data.EmployeePartial{
+		employeeCreated, err := c.EmployeeCreate(correlationId, ctx, data.EmployeePartial{
 			BirthDate: &birthDate,
 			FirstName: &firstName,
 			LastName:  &lastName,
@@ -117,25 +124,25 @@ func (c *clientTest) TestClient(cacheDisabled bool) func(t *testing.T) {
 		assert.NotNil(t, employeeCreated)
 		empNo := employeeCreated.EmpNo
 		defer func(empNo int64) {
-			_ = c.EmployeeDelete(ctx, empNo)
+			_ = c.EmployeeDelete(correlationId, ctx, empNo)
 		}(empNo)
 
 		if !cacheDisabled {
 			// validate that employee not in cache
-			employeeCached, err := c.cache.EmployeeRead(ctx, empNo)
+			employeeCached, err := c.cache.EmployeeRead(correlationId, ctx, empNo)
 			assert.NotNil(t, err)
 			assert.Nil(t, employeeCached)
 		}
 
 		// read employee
-		employeeRead, err := c.EmployeeRead(ctx, empNo)
+		employeeRead, err := c.EmployeeRead(correlationId, ctx, empNo)
 		assert.Nil(t, err)
 		assert.NotNil(t, employeeRead)
 		assert.Equal(t, employeeCreated, employeeRead)
 
 		// validate that employee in cache
 		if !cacheDisabled {
-			employeeCached, err := c.cache.EmployeeRead(ctx, empNo)
+			employeeCached, err := c.cache.EmployeeRead(correlationId, ctx, empNo)
 			assert.Nil(t, err)
 			assert.NotNil(t, employeeCached)
 			assert.Equal(t, employeeCreated, employeeCached)
@@ -144,7 +151,7 @@ func (c *clientTest) TestClient(cacheDisabled bool) func(t *testing.T) {
 		// update employee
 		updatedFirstName := internal.GenerateId()[:14]
 		updatedLastName := internal.GenerateId()[:16]
-		employeeUpdated, err := c.EmployeeUpdate(ctx, empNo, data.EmployeePartial{
+		employeeUpdated, err := c.EmployeeUpdate(correlationId, ctx, empNo, data.EmployeePartial{
 			FirstName: &updatedFirstName,
 			LastName:  &updatedLastName,
 		})
@@ -153,31 +160,31 @@ func (c *clientTest) TestClient(cacheDisabled bool) func(t *testing.T) {
 
 		// validate that employee not in cache
 		if !cacheDisabled {
-			employeeCached, err := c.cache.EmployeeRead(ctx, empNo)
+			employeeCached, err := c.cache.EmployeeRead(correlationId, ctx, empNo)
 			assert.NotNil(t, err)
 			assert.Nil(t, employeeCached)
 		}
 
 		// read employee
-		employeeRead, err = c.EmployeeRead(ctx, empNo)
+		employeeRead, err = c.EmployeeRead(correlationId, ctx, empNo)
 		assert.Nil(t, err)
 		assert.NotNil(t, employeeRead)
 		assert.Equal(t, employeeUpdated, employeeRead)
 
 		// validate that employee in cache
 		if !cacheDisabled {
-			employeeCached, err := c.cache.EmployeeRead(ctx, empNo)
+			employeeCached, err := c.cache.EmployeeRead(correlationId, ctx, empNo)
 			assert.Nil(t, err)
 			assert.NotNil(t, employeeCached)
 			assert.Equal(t, employeeUpdated, employeeCached)
 		}
 
 		// delete employee
-		err = c.EmployeeDelete(ctx, empNo)
+		err = c.EmployeeDelete(correlationId, ctx, empNo)
 		assert.Nil(t, err)
 		if !cacheDisabled {
 			// validate that employee not in cache
-			employeeCached, err := c.cache.EmployeeRead(ctx, empNo)
+			employeeCached, err := c.cache.EmployeeRead(correlationId, ctx, empNo)
 			assert.NotNil(t, err)
 			assert.Nil(t, employeeCached)
 		}

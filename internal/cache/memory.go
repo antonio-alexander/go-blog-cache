@@ -7,40 +7,99 @@ import (
 	"sync"
 
 	"github.com/antonio-alexander/go-blog-cache/internal/data"
+	"github.com/antonio-alexander/go-blog-cache/internal/utilities"
 )
 
 type memoryCache struct {
 	sync.RWMutex
-	employees map[int64]*data.Employee      //map[emp_no]employee
-	searches  map[string]map[int64]struct{} //map[search][emp_no]
+	utilities.CacheCounter
+	utilities.Logger
+	employees  map[int64]*data.Employee      //map[emp_no]employee
+	searches   map[string]map[int64]struct{} //map[search][emp_no]
+	configured bool
 }
 
 func NewMemory(parameters ...interface{}) Cache {
-	return &memoryCache{
-		employees: make(map[int64]*data.Employee),
-		searches:  make(map[string]map[int64]struct{}),
+	c := &memoryCache{}
+	for _, p := range parameters {
+		switch p := p.(type) {
+		case utilities.CacheCounter:
+			c.CacheCounter = p
+		case utilities.Logger:
+			c.Logger = p
+		}
+	}
+	return c
+}
+
+func (c *memoryCache) Error(correlationId, format string, v ...interface{}) {
+	if c.Logger != nil {
+		c.Logger.Error(correlationId, format, v...)
 	}
 }
 
+func (c *memoryCache) Trace(correlationId, format string, v ...interface{}) {
+	if c.Logger != nil {
+		c.Logger.Trace(correlationId, format, v...)
+	}
+}
+
+func (c *memoryCache) IncrementHit(item any) (hitCount int) {
+	if c.CacheCounter != nil {
+		var key interface{}
+		switch v := item.(type) {
+		default:
+			key = item
+		case string:
+			key = fmt.Sprintf("employee_search_%s", v)
+		case int64:
+			key = fmt.Sprintf("employee_%d", v)
+		}
+		return c.CacheCounter.IncrementHit(key)
+	}
+	return -1
+}
+
+func (c *memoryCache) IncrementMiss(item any) (hitCount int) {
+	if c.CacheCounter != nil {
+		var key interface{}
+		switch v := item.(type) {
+		default:
+			key = item
+		case string:
+			key = fmt.Sprintf("employee_search_%s", v)
+		case int64:
+			key = fmt.Sprintf("employee_%d", v)
+		}
+		return c.CacheCounter.IncrementMiss(key)
+	}
+	return -1
+}
+
 func (c *memoryCache) Configure(envs map[string]string) error {
+	c.configured = true
 	return nil
 }
 
-func (c *memoryCache) Open() error {
+func (c *memoryCache) Open(correlationId string) error {
 	c.Lock()
 	defer c.Unlock()
 
+	c.employees = make(map[int64]*data.Employee)
+	c.searches = make(map[string]map[int64]struct{})
 	return nil
 }
 
-func (c *memoryCache) Close() error {
+func (c *memoryCache) Close(correlationId string) error {
 	c.Lock()
 	defer c.Unlock()
 
+	c.employees = nil
+	c.searches = nil
 	return nil
 }
 
-func (c *memoryCache) Clear(ctx context.Context) error {
+func (c *memoryCache) Clear(correlationId string, ctx context.Context) error {
 	c.Lock()
 	defer c.Unlock()
 
@@ -50,18 +109,22 @@ func (c *memoryCache) Clear(ctx context.Context) error {
 	return nil
 }
 
-func (c *memoryCache) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error) {
+func (c *memoryCache) EmployeeRead(correlationId string, ctx context.Context, empNo int64) (*data.Employee, error) {
 	c.RLock()
 	defer c.RUnlock()
 
 	employee, ok := c.employees[empNo]
 	if !ok {
+		c.IncrementMiss(empNo)
+		c.Trace(correlationId, "cache miss for employee: %d", empNo)
 		return nil, errors.New("employee not found")
 	}
+	c.IncrementHit(empNo)
+	c.Trace(correlationId, "cache hit for employee: %d", empNo)
 	return copyEmployee(employee), nil
 }
 
-func (c *memoryCache) EmployeesRead(ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error) {
+func (c *memoryCache) EmployeesRead(correlationId string, ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error) {
 	c.RLock()
 	defer c.RUnlock()
 
@@ -71,6 +134,8 @@ func (c *memoryCache) EmployeesRead(ctx context.Context, search data.EmployeeSea
 	}
 	searches, ok := c.searches[searchKey]
 	if !ok {
+		c.IncrementMiss(searchKey)
+		c.Trace(correlationId, "cache miss for employee search: %s", searchKey)
 		return nil, errors.New("search not cached")
 	}
 	employees := make([]*data.Employee, 0, len(searches))
@@ -81,34 +146,41 @@ func (c *memoryCache) EmployeesRead(ctx context.Context, search data.EmployeeSea
 		}
 		employees = append(employees, copyEmployee(e))
 	}
+	c.Trace(correlationId, "cache hit for employee search: %s", searchKey)
+	c.IncrementHit(searchKey)
 	return employees, nil
 }
 
-func (c *memoryCache) EmployeesWrite(ctx context.Context, search data.EmployeeSearch, es ...*data.Employee) error {
+func (c *memoryCache) EmployeesWrite(correlationId string, ctx context.Context, search data.EmployeeSearch, es ...*data.Employee) error {
 	c.Lock()
 	defer c.Unlock()
 
 	searchKey, err := searchToKey(search)
 	if err != nil {
-		fmt.Printf("error while creating search key: %s\n", err)
+		c.Error(correlationId, "error while creating search key: %s", err)
+		return err
 	}
 	if _, ok := c.searches[searchKey]; !ok {
 		c.searches[searchKey] = make(map[int64]struct{})
+		c.Trace(correlationId, "cached employees search: %s", searchKey)
 	}
 	for _, e := range es {
 		employee := copyEmployee(e)
 		c.employees[employee.EmpNo] = employee
 		c.searches[searchKey][employee.EmpNo] = struct{}{}
+		c.Trace(correlationId, "cached employee: %d", employee.EmpNo)
 	}
 	return nil
 }
 
-func (c *memoryCache) EmployeesDelete(ctx context.Context, empNos ...int64) error {
+func (c *memoryCache) EmployeesDelete(correlationId string, ctx context.Context, empNos ...int64) error {
 	c.Lock()
 	defer c.Unlock()
 
 	for _, empNo := range empNos {
 		delete(c.employees, empNo)
+		c.Trace(correlationId, "invalided cached employee: %d", empNo)
 	}
+	//TODO: invalidate the search key somehow?
 	return nil
 }
