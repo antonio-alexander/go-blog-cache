@@ -1,25 +1,24 @@
-// Package Swagger go-blog-cache
+// Package Swagger go-blog-big-data
 //
-// An API to allow you to interact with a go-blog-cache.
+// An API to allow you to interact with a go-blog-big-data.
 //
-//   Schemes: http, https
-//   Version: 1.0
-//   Host: localhost:8080
-//   BasePath:/
+//	 Schemes: http, https
+//	 Version: 1.0
+//	 Host: localhost:8080
+//	 BasePath:/
 //
-//   Consumes:
-//   - application/json
+//	 Consumes:
+//	 - application/json
 //
-//   Produces:
-//   - application/json
+//	 Produces:
+//	 - application/json
 //
-//   Security:
-//   - basic
+//	 Security:
+//	 - basic
 //
-//  SecurityDefinitions:
-//  basic:
-//    type: basic
+//	SecurityDefinitions:
+//	basic:
+//	  type: basic
 //
 // swagger:meta
 package swagger
-

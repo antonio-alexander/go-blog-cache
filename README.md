@@ -1,4 +1,4 @@
-# go-blog-cache (github.com/antonio-alexander/go-cache)
+# go-blog-big-data (github.com/antonio-alexander/go-cache)
 
 Full disclosure, I'm writing this in hindsight; I, fortunately or unfortunately, have already made a lot of mistakes with caching, so _We_ don't have to do the work of learning the wrong thing. My initial experience with caching came from my microcontroller/controls background; which coincidentally is __identical__ to the normal use case for caching (more on this later). So the goal of this repository is to describe the general mechanism behind caching and to show an implementation in Go as well as some examples in the wild that I've used in [go-bludgeon](github.com/antonio-alexander/go-bludgeon).
 
@@ -274,7 +274,6 @@ Below, we'll go through a number of scenarios to try to point out situations whe
 
 1. Resource API
 2. Timeseries API
-3. Live Concurrent Edits
 
 ### Cache Scenario 1: Resource API
 

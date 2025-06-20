@@ -2,7 +2,7 @@
     "go.testFlags": [
         "-v",
         "-cover",
-        "-coverpkg=github.com/antonio-alexander/go-blog-cache/internal/sql,github.com/antonio-alexander/go-blog-cache/internal/cache,github.com/antonio-alexander/go-blog-cache/internal/logic",
+        "-coverpkg=github.com/antonio-alexander/go-blog-big-data/internal/sql,github.com/antonio-alexander/go-blog-big-data/internal/cache,github.com/antonio-alexander/go-blog-big-data/internal/logic",
         "-count=1"
     ]
 }

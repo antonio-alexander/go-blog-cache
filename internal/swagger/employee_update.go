@@ -1,6 +1,6 @@
 package swagger
 
-import "github.com/antonio-alexander/go-blog-cache/internal/data"
+import "github.com/antonio-alexander/go-blog-big-data/internal/data"
 
 // swagger:route POST /employees/{emp_no} Employee UpdateEmployee
 // Updates an employee using its id.
@@ -22,6 +22,9 @@ type EmployeePostResponseOk struct {
 
 // swagger:parameters UpdateEmployee
 type EmployeePostParams struct {
+	// in:header
+	CorrelationId string `json:"Correlation-Id"`
+
 	// in:path
 	EmpNo string `json:"emp_no"`
 

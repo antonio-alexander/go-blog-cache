@@ -1,6 +1,6 @@
 package swagger
 
-import "github.com/antonio-alexander/go-blog-cache/internal/data"
+import "github.com/antonio-alexander/go-blog-big-data/internal/data"
 
 // swagger:route GET /employees/{emp_no} Employee ReadEmployee
 // Reads an employee using its id.
@@ -22,6 +22,9 @@ type EmployeeGetResponseOk struct {
 
 // swagger:parameters ReadEmployee
 type EmployeeGetParams struct {
+	// in:header
+	CorrelationId string `json:"Correlation-Id"`
+
 	// in:path
 	EmpNo string `json:"emp_no"`
 }

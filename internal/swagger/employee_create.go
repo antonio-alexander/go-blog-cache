@@ -1,6 +1,6 @@
 package swagger
 
-import "github.com/antonio-alexander/go-blog-cache/internal/data"
+import "github.com/antonio-alexander/go-blog-big-data/internal/data"
 
 // swagger:route PUT /employees Employee CreateEmployee
 // Creates an employee.
@@ -22,6 +22,9 @@ type EmployeePutResponseOk struct {
 
 // swagger:parameters CreateEmployee
 type EmployeePutParams struct {
+	// in:header
+	CorrelationId string `json:"Correlation-Id"`
+
 	// in:body
 	EmployeePartial data.EmployeePartial `json:"employee_partial"`
 }

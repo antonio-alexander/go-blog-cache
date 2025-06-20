@@ -6,8 +6,18 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/antonio-alexander/go-blog-cache/internal/data"
+	"github.com/antonio-alexander/go-blog-big-data/internal/data"
 )
+
+func getCorrelationId(req *http.Request) string {
+	if correlationId := req.Header.Get("Correlation-Id"); correlationId != "" {
+		return correlationId
+	}
+	if correlationId := req.URL.Query().Get("correlation_id"); correlationId != "" {
+		return correlationId
+	}
+	return ""
+}
 
 func empNoFromPath(pathVariables map[string]string) (int64, error) {
 	empNo := pathVariables[data.PathEmpNo]

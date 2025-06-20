@@ -10,7 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/antonio-alexander/go-blog-cache/internal/data"
+	"github.com/antonio-alexander/go-blog-big-data/internal/data"
+	"github.com/antonio-alexander/go-blog-big-data/internal/utilities"
 
 	_ "github.com/go-sql-driver/mysql" //import for driver support
 )
@@ -24,6 +25,7 @@ const (
 type Sql struct {
 	sync.RWMutex
 	*sql.DB
+	utilities.Logger
 	config struct {
 		Hostname       string        `json:"hostname"`
 		Port           string        `json:"port"`
@@ -38,7 +40,14 @@ type Sql struct {
 }
 
 func NewSql(parameters ...interface{}) *Sql {
-	return &Sql{}
+	s := &Sql{}
+	for _, p := range parameters {
+		switch p := p.(type) {
+		case utilities.Logger:
+			s.Logger = p
+		}
+	}
+	return s
 }
 
 func (s *Sql) Configure(envs map[string]string) error {
@@ -67,7 +76,7 @@ func (s *Sql) Configure(envs map[string]string) error {
 	return nil
 }
 
-func (s *Sql) Open() error {
+func (s *Sql) Open(correlationId string) error {
 	//EXAMPLE: [username[:password]@][protocol[(address)]]/dbname[?param1=value1&...&paramN=valueN]
 	// user:password@tcp(localhost:5555)/dbname?charset=utf8
 	dataSourceName := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=%t",
@@ -85,7 +94,7 @@ func (s *Sql) Open() error {
 	return nil
 }
 
-func (s *Sql) Close() error {
+func (s *Sql) Close(correlationId string) error {
 	if !s.opened {
 		return nil
 	}
@@ -95,7 +104,7 @@ func (s *Sql) Close() error {
 	return nil
 }
 
-func (s *Sql) EmployeeCreate(ctx context.Context, employeePartial data.EmployeePartial) (*data.Employee, error) {
+func (s *Sql) EmployeeCreate(correlationId string, ctx context.Context, employeePartial data.EmployeePartial) (*data.Employee, error) {
 	var columns, values []string
 	var args []interface{}
 
@@ -136,10 +145,10 @@ func (s *Sql) EmployeeCreate(ctx context.Context, employeePartial data.EmployeeP
 	if _, err := s.ExecContext(ctx, query, args...); err != nil {
 		return nil, err
 	}
-	return s.EmployeeRead(ctx, empNo)
+	return s.EmployeeRead(correlationId, ctx, empNo)
 }
 
-func (s *Sql) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error) {
+func (s *Sql) EmployeeRead(correlationId string, ctx context.Context, empNo int64) (*data.Employee, error) {
 	query := fmt.Sprintf(`SELECT emp_no, birth_date, first_name, last_name,
 		gender, hire_date FROM %s WHERE emp_no = ?;`,
 		tableEmployees)
@@ -151,7 +160,7 @@ func (s *Sql) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, er
 	return employee, nil
 }
 
-func (s *Sql) EmployeesSearch(ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error) {
+func (s *Sql) EmployeesSearch(correlationId string, ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error) {
 	var employees []*data.Employee
 
 	criteria, args := employeeCriteria(search)
@@ -172,7 +181,7 @@ func (s *Sql) EmployeesSearch(ctx context.Context, search data.EmployeeSearch) (
 	return employees, nil
 }
 
-func (s *Sql) EmployeeUpdate(ctx context.Context, empNo int64, employeePartial data.EmployeePartial) (*data.Employee, error) {
+func (s *Sql) EmployeeUpdate(correlationId string, ctx context.Context, empNo int64, employeePartial data.EmployeePartial) (*data.Employee, error) {
 	var args []interface{}
 	var updates []string
 
@@ -202,10 +211,10 @@ func (s *Sql) EmployeeUpdate(ctx context.Context, empNo int64, employeePartial d
 	if _, err := s.ExecContext(ctx, query, args...); err != nil {
 		return nil, err
 	}
-	return s.EmployeeRead(ctx, empNo)
+	return s.EmployeeRead(correlationId, ctx, empNo)
 }
 
-func (s *Sql) EmployeeDelete(ctx context.Context, empNo int64) error {
+func (s *Sql) EmployeeDelete(correlationId string, ctx context.Context, empNo int64) error {
 	query := fmt.Sprintf(`DELETE FROM %s WHERE emp_no = ?;`,
 		tableEmployees)
 	result, err := s.ExecContext(ctx, query, empNo)

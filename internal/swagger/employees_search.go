@@ -1,6 +1,6 @@
 package swagger
 
-import "github.com/antonio-alexander/go-blog-cache/internal/data"
+import "github.com/antonio-alexander/go-blog-big-data/internal/data"
 
 // swagger:route GET /employees/search Employee SearchEmployee
 // Searches employees using search criteria.
@@ -22,6 +22,9 @@ type EmployeeSearchGetResponseOk struct {
 
 // swagger:parameters SearchEmployee
 type EmployeeSearchGetParams struct {
+	// in:header
+	CorrelationId string `json:"Correlation-Id"`
+
 	// in:query
 	data.EmployeeSearch
 }

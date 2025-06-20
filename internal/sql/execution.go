@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/antonio-alexander/go-blog-cache/internal/data"
+	"github.com/antonio-alexander/go-blog-big-data/internal/data"
 )
 
 func employeeCriteria(search data.EmployeeSearch) (string, []interface{}) {

@@ -8,12 +8,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antonio-alexander/go-blog-cache/internal"
-	"github.com/antonio-alexander/go-blog-cache/internal/cache"
-	"github.com/antonio-alexander/go-blog-cache/internal/data"
-	"github.com/antonio-alexander/go-blog-cache/internal/logic"
-	"github.com/antonio-alexander/go-blog-cache/internal/service"
-	"github.com/antonio-alexander/go-blog-cache/internal/sql"
+	"github.com/antonio-alexander/go-blog-big-data/internal"
+	"github.com/antonio-alexander/go-blog-big-data/internal/cache"
+	"github.com/antonio-alexander/go-blog-big-data/internal/data"
+	"github.com/antonio-alexander/go-blog-big-data/internal/logic"
+	"github.com/antonio-alexander/go-blog-big-data/internal/service"
+	"github.com/antonio-alexander/go-blog-big-data/internal/sql"
+	"github.com/antonio-alexander/go-blog-big-data/internal/utilities"
+	"github.com/antonio-alexander/go-stash/memory"
+	"github.com/antonio-alexander/go-stash/redis"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -28,18 +31,28 @@ var (
 		"DATABASE_PASSWORD":      "mysql",
 		"DATABASE_QUERY_TIMEOUT": "10",
 		"DATABASE_PARSE_TIME":    "true",
-
-		//cache
-		"REDIS_ADDRESS": "localhost",
-		"REDIS_PORT":    "6379",
-		"REDIS_TIMEOUT": "10",
-
+		//redis
+		"REDIS_ADDRESS":  "localhost",
+		"REDIS_PORT":     "6379",
+		"REDIS_TIMEOUT":  "10",
+		"REDIS_PASSWORD": "",
+		"REDIS_DATABASE": "0",
+		"REDIS_HASH_KEY": "go_blog_cache",
 		//logic
 		"LOGIC_CACHE_ENABLED": "true",
-
+		//logger
+		"LOGGING_LEVEL": "TRACE",
+		//stash_memory
+		"STASH_EVICTION_POLICY": "least_recently_used",
+		"STASH_TIME_TO_LIVE":    "0",
+		"STASH_MAX_SIZE":        "5242880", //5MB
+		"STASH_DEBUG_ENABLED":   "false",
+		"STASH_DEBUG_PREFIX":    "stash ",
+		//stash_redis
+		"STASH_EVICTION_RATE": "1", //1s
 		//service
 		"SERVICE_ADDRESS":                "localhost",
-		"SERVICE_PORT":                   "8080",
+		"SERVICE_PORT":                   "8000", //KIM: we don't want this to conflict
 		"SERVICE_SHUTDOWN_TIMEOUT":       "30",
 		"SERVICE_CORS_ALLOW_CREDENTIALS": "",
 		"SERVICE_CORS_ALLOWED_ORIGINS":   "",
@@ -58,88 +71,51 @@ func init() {
 }
 
 type serviceTest struct {
-	sql    *sql.Sql
-	cache  cache.Cache
-	logic  *logic.Logic
-	client *http.Client
-	*service.Service
+	sql          *sql.Sql
+	cache        cache.Cache
+	logger       utilities.Logger
+	logic        logic.Logic
+	timers       utilities.Timers
+	cacheCounter utilities.CacheCounter
+	client       *http.Client
+	service.Service
 	address string
 }
 
 func newServiceTest(cacheType string) *serviceTest {
-	var c cache.Cache
+	var employeeCache cache.Cache
 
-	sql := sql.NewSql()
+	logger := utilities.NewLogger()
+	cacheCounter := utilities.NewCacheCounter()
+	timers := utilities.NewTimers()
+	sql := sql.NewSql(logger)
 	switch cacheType {
 	case "memory":
-		c = cache.NewMemory()
+		employeeCache = cache.NewMemory(logger, cacheCounter)
 	case "redis":
-		c = cache.NewRedis()
+		employeeCache = cache.NewRedis(logger, cacheCounter)
+	case "stash-memory":
+		stash := memory.New()
+		employeeCache = cache.NewStash(logger, cacheCounter, stash)
+	case "stash-redis":
+		stash := redis.New()
+		employeeCache = cache.NewStash(logger, cacheCounter, stash)
 	}
-	logic := logic.NewLogic(sql, c)
-	service := service.NewService(logic)
+	logic := logic.NewLogic(sql, employeeCache, logger)
+	service := service.NewService(logic, logger, timers)
 	return &serviceTest{
-		sql:     sql,
-		cache:   c,
-		logic:   logic,
-		client:  &http.Client{},
-		Service: service,
+		sql:          sql,
+		cache:        employeeCache,
+		logic:        logic,
+		logger:       logger,
+		timers:       timers,
+		cacheCounter: cacheCounter,
+		client:       &http.Client{},
+		Service:      service,
 	}
 }
 
-func (s *serviceTest) Configure(envs map[string]string) error {
-	if err := s.sql.Configure(envs); err != nil {
-		return err
-	}
-	if err := s.cache.Configure(envs); err != nil {
-		return err
-	}
-	if err := s.logic.Configure(envs); err != nil {
-		return err
-	}
-	if err := s.Service.Configure(envs); err != nil {
-		return err
-	}
-	s.address = "http://" + envs["SERVICE_ADDRESS"]
-	if port := envs["SERVICE_PORT"]; port != "" {
-		s.address += ":" + port
-	}
-	return nil
-}
-
-func (s *serviceTest) Open() error {
-	if err := s.sql.Open(); err != nil {
-		return err
-	}
-	if err := s.cache.Open(); err != nil {
-		return err
-	}
-	if err := s.logic.Open(); err != nil {
-		return err
-	}
-	if err := s.Service.Open(); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *serviceTest) Close() error {
-	if err := s.sql.Close(); err != nil {
-		return err
-	}
-	if err := s.cache.Close(); err != nil {
-		return err
-	}
-	if err := s.logic.Close(); err != nil {
-		return err
-	}
-	if err := s.Service.Close(); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *serviceTest) TestService(t *testing.T) {
+func (s *serviceTest) testService(t *testing.T) {
 	var request data.Request
 	var response data.Response
 
@@ -202,23 +178,79 @@ func (s *serviceTest) TestService(t *testing.T) {
 	assert.Nil(t, err)
 }
 
+func (s *serviceTest) Configure(envs map[string]string) error {
+	if err := s.sql.Configure(envs); err != nil {
+		return err
+	}
+	if err := s.cache.Configure(envs); err != nil {
+		return err
+	}
+	if err := s.logic.Configure(envs); err != nil {
+		return err
+	}
+	if err := s.logger.Configure(envs); err != nil {
+		return err
+	}
+	if err := s.Service.Configure(envs); err != nil {
+		return err
+	}
+	s.address = "http://" + envs["SERVICE_ADDRESS"]
+	if port := envs["SERVICE_PORT"]; port != "" {
+		s.address += ":" + port
+	}
+	return nil
+}
+
+func (s *serviceTest) Open(correlationId string) error {
+	if err := s.sql.Open(correlationId); err != nil {
+		return err
+	}
+	if err := s.cache.Open(correlationId); err != nil {
+		return err
+	}
+	if err := s.logic.Open(correlationId); err != nil {
+		return err
+	}
+	if err := s.Service.Open(correlationId); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *serviceTest) Close(correlationId string) error {
+	if err := s.sql.Close(correlationId); err != nil {
+		return err
+	}
+	if err := s.cache.Close(correlationId); err != nil {
+		return err
+	}
+	if err := s.logic.Close(correlationId); err != nil {
+		return err
+	}
+	if err := s.Service.Close(correlationId); err != nil {
+		return err
+	}
+	return nil
+}
+
 func testService(t *testing.T, cacheType string) {
+	const correlationId string = "test_service"
 	c := newServiceTest(cacheType)
 
 	err := c.Configure(envs)
 	if !assert.Nil(t, err) {
 		assert.FailNow(t, "unable to configure testService")
 	}
-	err = c.Open()
+	err = c.Open(correlationId)
 	if !assert.Nil(t, err) {
 		assert.FailNow(t, "unable to open testService")
 	}
 	defer func() {
-		if err := c.Close(); err != nil {
+		if err := c.Close(correlationId); err != nil {
 			t.Logf("error while closing testService: %s", err)
 		}
 	}()
-	t.Run("Service", c.TestService)
+	t.Run("Service", c.testService)
 }
 
 func TestServiceMemory(t *testing.T) {
@@ -227,4 +259,12 @@ func TestServiceMemory(t *testing.T) {
 
 func TestServiceRedis(t *testing.T) {
 	testService(t, "redis")
+}
+
+func TestServiceStashMemory(t *testing.T) {
+	testService(t, "stash-memory")
+}
+
+func TestServiceStashRedis(t *testing.T) {
+	testService(t, "stash-redis")
 }
