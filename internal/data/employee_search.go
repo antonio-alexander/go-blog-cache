@@ -1,6 +1,7 @@
 package data
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -38,4 +39,12 @@ func (e *EmployeeSearch) FromParams(params url.Values) {
 			}
 		}
 	}
+}
+
+func (e *EmployeeSearch) MarshalBinary() ([]byte, error) {
+	return json.Marshal(e)
+}
+
+func (e *EmployeeSearch) UnmarshalBinary(data []byte) error {
+	return json.Unmarshal(data, e)
 }

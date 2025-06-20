@@ -9,12 +9,29 @@ services:
       - "3306:3306"
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-mysql}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-go_blog_cache}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-employees}
       MYSQL_USER: ${MYSQL_USER:-mysql}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-mysql}
+    healthcheck:
+      test: mysqladmin ping -h 127.0.0.1 -u $$MYSQL_USER --password=$$MYSQL_PASSWORD
+      start_period: 5s
+      interval: 5s
+      timeout: 5s
+      retries: 55
     volumes:
+      - sql:/var/lib/mysql
       - ./sql/test_db:/tmp/test_db
       - ./cmd/mysql/001_load_employees.sh:/docker-entrypoint-initdb.d/001_load_employees.sh
+      # - ./sql/test_db/employees.sql:/docker-entrypoint-initdb.d/employees.sql
+      # - ./sql/test_db/load_departments.dump:/docker-entrypoint-initdb.d/load_departments.dump
+      # - ./sql/test_db/load_employees.dump:/docker-entrypoint-initdb.d/load_employees.dump
+      # - ./sql/test_db/load_dept_emp.dump:/docker-entrypoint-initdb.d/load_dept_emp.dump
+      # - ./sql/test_db/load_dept_manager.dump:/docker-entrypoint-initdb.d/load_dept_manager.dump
+      # - ./sql/test_db/load_titles.dump:/docker-entrypoint-initdb.d/load_titles.dump
+      # - ./sql/test_db/load_salaries1.dump:/docker-entrypoint-initdb.d/load_salaries1.dump
+      # - ./sql/test_db/load_salaries2.dump:/docker-entrypoint-initdb.d/load_salaries2.dump
+      # - ./sql/test_db/load_salaries3.dump:/docker-entrypoint-initdb.d/load_salaries3.dump
+      # - ./sql/test_db/show_elapsed.sql:/docker-entrypoint-initdb.d/show_elapsed.sql
 
   redis:
     container_name: "redis"
@@ -31,16 +48,16 @@ services:
     profiles: [ "application" ]
     image: nginx:1.21.6-alpine
     depends_on:
-      - go-blog-cache_read
-      - go-blog-cache_write
+      - read
+      - go-blog-cache-write
     restart: "always"
     ports:
       - "8080:80"
     volumes:
       - "./config/nginx.conf:/etc/nginx/conf.d/default.conf"
 
-  go-blog-cache_read:
-    hostname: "go-blog-cache_read"
+  read:
+    hostname: "go-blog-cache-read"
     profiles: [ "application" ]
     image: ghcr.io/antonio-alexander/go-blog-cache:latest
     depends_on:
@@ -71,15 +88,17 @@ services:
       SERVICE_CORS_DISABLED: ${SERVICE_CORS_DISABLED}
       SERVICE_CORS_ALLOWED_ORIGINS: ${SERVICE_CORS_ALLOWED_ORIGINS:-*}
       SERVICE_CORS_ALLOWED_METHODS: ${SERVICE_CORS_ALLOWED_METHODS:-POST,PUT,GET,DELETE,PATCH}
+      SERVICE_CORS_ALLOWED_HEADERS: ${SERVICE_CORS_ALLOWED_HEADERS:-Access-Control-Allow-Origin,Correlation-Id}
       SERVICE_CORS_DEBUG: ${SERVICE_CORS_DEBUG}
       DATABASE_PARSE_TIME: ${DATABASE_PARSE_TIME:-true}
       REDIS_ADDRESS: ${REDIS_ADDRESS:-redis}
       REDIS_PORT:    ${REDIS_PORT:-6379}
-      MUTATE_DISABLED: "true"
+      MUTATE_DISABLED: ${MUTATE_DISABLED:-true}
+      LOGGING_LEVEL: ${LOGGING_LEVEL}
 
-  go-blog-cache_write:
-    container_name: "go-blog-cache_write"
-    hostname: "go-blog-cache_write"
+  go-blog-cache-write:
+    container_name: "go-blog-cache-write"
+    hostname: "go-blog-cache-write"
     profiles: [ "application" ]
     image: ghcr.io/antonio-alexander/go-blog-cache:latest
     depends_on:
@@ -107,9 +126,13 @@ services:
       SERVICE_SHUTDOWN_TIMEOUT: ${SERVICE_SHUTDOWN_TIMEOUT:-10}
       SERVICE_CORS_DISABLED: ${SERVICE_CORS_DISABLED}
       SERVICE_CORS_ALLOWED_ORIGINS: ${SERVICE_CORS_ALLOWED_ORIGINS:-*}
+      SERVICE_CORS_ALLOWED_HEADERS: ${SERVICE_CORS_ALLOWED_HEADERS:-Access-Control-Allow-Origin,Correlation-Id}
       SERVICE_CORS_ALLOWED_METHODS: ${SERVICE_CORS_ALLOWED_METHODS:-POST,PUT,GET,DELETE,PATCH}
       SERVICE_CORS_DEBUG: ${SERVICE_CORS_DEBUG}
       DATABASE_PARSE_TIME: ${DATABASE_PARSE_TIME:-true}
       REDIS_ADDRESS: ${REDIS_ADDRESS:-redis}
       REDIS_PORT:    ${REDIS_PORT:-6379}
-      MUTATE_DISABLED: "false"
+      LOGGING_LEVEL: ${LOGGING_LEVEL}
+
+volumes:
+  sql:

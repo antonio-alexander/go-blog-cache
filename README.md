@@ -274,7 +274,6 @@ Below, we'll go through a number of scenarios to try to point out situations whe
 
 1. Resource API
 2. Timeseries API
-3. Live Concurrent Edits
 
 ### Cache Scenario 1: Resource API
 

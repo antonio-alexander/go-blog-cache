@@ -9,6 +9,7 @@ swagger_port = 8082
 env_file=.env # default env file
 docker_args=-l error #default args, supresses warnings
 
+service_test_folders := `go list ./internal/... | grep -v './internal/client'`
 mysql_root_password := `cat $(env_file) | grep MYSQL_ROOT_PASSWORD | sed 's/MYSQL_ROOT_PASSWORD=//g' | tr -d '"'`
 mysql_user := `cat $(env_file) | grep MYSQL_USER | sed 's/MYSQL_USER=//g' | tr -d '"'`
 mysql_password := `cat $(env_file) | grep MYSQL_PASSWORD | sed 's/MYSQL_PASSWORD=//g' | tr -d '"'`
@@ -45,10 +46,16 @@ dep: ## run all dependencies
 	@docker ${docker_args} compose up --detach --wait
 
 run: ## run all dependencies
+	@docker ${docker_args} container rm -f go-blog-cache-write
+	@docker ${docker_args} container rm -f go-blog-cache-read-1
+	@docker ${docker_args} container rm -f go-blog-cache-read-2
 	@docker ${docker_args} compose --profile application up --detach --wait
 
-test: run
-	@go test ./internal/... -cover -count=1 -v
+test-client:
+	@go test ./internal/client/... -cover -count=1 -v -parallel=1
+
+test-service:
+	@go test ${service_test_folders} -cover -count=1 -v -parallel=1
 
 stop: ## stop all dependencies and services
 	@docker ${docker_args} compose --profile application down

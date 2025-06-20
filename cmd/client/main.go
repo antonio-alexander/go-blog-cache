@@ -13,6 +13,10 @@ import (
 	"github.com/antonio-alexander/go-blog-cache/internal/cache"
 	"github.com/antonio-alexander/go-blog-cache/internal/client"
 	"github.com/antonio-alexander/go-blog-cache/internal/data"
+	"github.com/antonio-alexander/go-blog-cache/internal/utilities"
+	"github.com/antonio-alexander/go-stash"
+	"github.com/antonio-alexander/go-stash/memory"
+	"github.com/antonio-alexander/go-stash/redis"
 
 	"github.com/pkg/errors"
 )
@@ -52,34 +56,78 @@ func main() {
 }
 
 func Main(args []string, envs map[string]string, osSignal chan (os.Signal)) error {
-	fmt.Printf("client: go-blog-cache v%s (%s) built from: %s\n",
+	const correlationId string = "go_blog_cache-client"
+	var cacheCounter utilities.CacheCounter
+	var employeeCache cache.Cache
+	var stash interface {
+		stash.Stasher
+		stash.Configurer
+		stash.Initializer
+		stash.Shutdowner
+		stash.Parameterizer
+	}
+
+	// create logger, configure and open
+	logger := utilities.NewLogger()
+	if err := logger.Configure(envs); err != nil {
+		return err
+	}
+
+	logger.Info(correlationId, "client: go-blog-cache v%s (%s) built from: %s",
 		Version, GitCommit, GitBranch)
 
-	//create cache
-	cache := cache.NewRedis()
-	if err := cache.Configure(envs); err != nil {
-		return err
-	}
-	if err := cache.Open(); err != nil {
-		return err
-	}
-	defer func() {
-		if err := cache.Close(); err != nil {
-			fmt.Printf("error while closing cache: %s\n", err)
+	// create cache if configured
+	cacheEnabled, _ := strconv.ParseBool(envs["LOGIC_CACHE_ENABLED"])
+	cacheType := envs["LOGIC_CACHE_TYPE"]
+	if cacheEnabled {
+		// create cache counter
+		cacheCounter = utilities.NewCacheCounter()
+
+		switch cacheType {
+		default:
+			return errors.Errorf("unsupported cache type: %s", cacheType)
+		case "redis":
+			employeeCache = cache.NewRedis(logger, cacheCounter)
+		case "memory":
+			employeeCache = cache.NewMemory(logger, cacheCounter)
+		case "stash-memory":
+			stash = memory.New()
+			stash.SetParameters(logger)
+			employeeCache = cache.NewStash(logger, cacheCounter, stash)
+		case "stash-redis":
+			stash = redis.New()
+			stash.SetParameters(logger)
+			employeeCache = cache.NewStash(logger, cacheCounter, stash)
 		}
-	}()
+		if stash != nil {
+			if err := stash.Configure(envs); err != nil {
+				return err
+			}
+		}
+		if err := employeeCache.Configure(envs); err != nil {
+			return err
+		}
+		if err := employeeCache.Open(correlationId); err != nil {
+			return err
+		}
+		defer func() {
+			if err := employeeCache.Close(correlationId); err != nil {
+				logger.Error(correlationId, "error while closing cache: %s", err)
+			}
+		}()
+	}
 
 	//create client
-	client := client.NewClient(cache)
+	client := client.NewClient(employeeCache, logger)
 	if err := client.Configure(envs); err != nil {
 		return err
 	}
-	if err := client.Open(); err != nil {
+	if err := client.Open(correlationId); err != nil {
 		return err
 	}
 	defer func() {
-		if err := client.Close(); err != nil {
-			fmt.Printf("error while closing client: %s\n", err)
+		if err := client.Close(correlationId); err != nil {
+			logger.Error(correlationId, "error while closing client: %s", err)
 		}
 	}()
 
@@ -90,7 +138,7 @@ func Main(args []string, envs map[string]string, osSignal chan (os.Signal)) erro
 	default:
 		return errors.Errorf("unsupported command: %s", command)
 	case "employee_read":
-		employee, err := client.EmployeeRead(ctx, empNo)
+		employee, err := client.EmployeeRead(correlationId, ctx, empNo)
 		if err != nil {
 			return err
 		}

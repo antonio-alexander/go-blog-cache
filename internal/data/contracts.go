@@ -5,6 +5,8 @@ const (
 	RouteEmployeesSearch string = RouteEmployees + "/search"
 	RouteEmployeesEmpNo  string = RouteEmployees + "/{" + PathEmpNo + "}"
 	RouteEmployeesEmpNof string = RouteEmployees + "/%d"
+	RouteTimers          string = "/timers"
+	RouteCacheCounters   string = "/cachecounters"
 )
 
 const PathEmpNo string = "EmpNo"

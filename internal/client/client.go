@@ -15,13 +15,32 @@ import (
 
 	"github.com/antonio-alexander/go-blog-cache/internal/cache"
 	"github.com/antonio-alexander/go-blog-cache/internal/data"
+	"github.com/antonio-alexander/go-blog-cache/internal/utilities"
 
 	"github.com/pkg/errors"
 )
 
-type Client struct {
+type Client interface {
+	Configure(envs map[string]string) error
+	Open(correlationId string) error
+	Close(correlationId string) error
+	EmployeeCreate(correlationId string, ctx context.Context,
+		employeePartial data.EmployeePartial) (*data.Employee, error)
+	EmployeeRead(correlationId string, ctx context.Context,
+		empNo int64) (*data.Employee, error)
+	EmployeesSearch(correlationId string, ctx context.Context,
+		search data.EmployeeSearch) ([]*data.Employee, error)
+	EmployeeUpdate(correlationId string, ctx context.Context,
+		empNo int64, employeePartial data.EmployeePartial) (*data.Employee, error)
+	EmployeeDelete(correlationId string, ctx context.Context,
+		empNo int64) error
+}
+
+type client struct {
 	sync.RWMutex
 	*http.Client
+	utilities.Logger
+	utilities.Timers
 	cache  cache.Cache
 	config struct {
 		protocol      string
@@ -36,18 +55,22 @@ type Client struct {
 	address string
 }
 
-func NewClient(parameters ...interface{}) *Client {
-	c := &Client{Client: &http.Client{}}
+func NewClient(parameters ...any) Client {
+	c := &client{Client: &http.Client{}}
 	for _, parameter := range parameters {
 		switch p := parameter.(type) {
 		case cache.Cache:
 			c.cache = p
+		case utilities.Logger:
+			c.Logger = p
+		case utilities.Timers:
+			c.Timers = p
 		}
 	}
 	return c
 }
 
-func (c *Client) doRequest(ctx context.Context, uri, method string, item interface{}) ([]byte, error) {
+func (c *client) doRequest(correlationId string, ctx context.Context, uri, method string, item interface{}) ([]byte, error) {
 	var contentLength int
 	var contentType string
 	var body io.Reader
@@ -71,6 +94,7 @@ func (c *Client) doRequest(ctx context.Context, uri, method string, item interfa
 	if err != nil {
 		return nil, err
 	}
+	request.Header.Add("Correlation-Id", correlationId)
 	request.Header.Add("Content-Type", contentType)
 	request.Header.Add("Content-Length", strconv.Itoa(contentLength))
 	response, err := c.Do(request)
@@ -98,7 +122,19 @@ func (c *Client) doRequest(ctx context.Context, uri, method string, item interfa
 	}
 }
 
-func (c *Client) Configure(envs map[string]string) error {
+func (c *client) Error(correlationId, format string, v ...interface{}) {
+	if c.Logger != nil {
+		c.Logger.Error(correlationId, format, v...)
+	}
+}
+
+func (c *client) Trace(correlationId, format string, v ...interface{}) {
+	if c.Logger != nil {
+		c.Logger.Trace(correlationId, format, v...)
+	}
+}
+
+func (c *client) Configure(envs map[string]string) error {
 	if address, ok := envs["CLIENT_ADDRESS"]; ok {
 		c.config.address = address
 	}
@@ -130,7 +166,7 @@ func (c *Client) Configure(envs map[string]string) error {
 	return nil
 }
 
-func (c *Client) Open() error {
+func (c *client) Open(correlationId string) error {
 	c.Lock()
 	defer c.Unlock()
 
@@ -149,7 +185,7 @@ func (c *Client) Open() error {
 		}
 	}
 	if c.config.cacheDisabled {
-		fmt.Println("cache disabled")
+		c.Debug(correlationId, "cache disabled")
 	}
 	c.Client.Timeout = time.Duration(c.config.timeout) * time.Second
 	tlsConfig, err := getTlsConfig(c.config.sslCaFile, c.config.sslCrtFile,
@@ -158,24 +194,31 @@ func (c *Client) Open() error {
 		return err
 	}
 	c.Client.Transport = tlsConfig
+	c.Debug(correlationId, "client configured")
 	return nil
 }
 
-func (c *Client) Close() error {
+func (c *client) Close(correlationId string) error {
 	c.Lock()
 	defer c.Unlock()
 
 	return nil
 }
 
-func (c *Client) EmployeeCreate(ctx context.Context, employeePartial data.EmployeePartial) (*data.Employee, error) {
+func (c *client) EmployeeCreate(correlationId string, ctx context.Context, employeePartial data.EmployeePartial) (*data.Employee, error) {
+	timerIndex := c.Start("employee_create")
+	defer func() {
+		elapsedtime := c.Stop("employee_create", timerIndex)
+		c.Trace(correlationId, "employee_create took %v",
+			time.Duration(elapsedtime)*time.Nanosecond)
+	}()
 	bytes, err := json.Marshal(&data.Request{
 		EmployeePartial: employeePartial})
 	if err != nil {
 		return nil, err
 	}
 	uri := c.address + data.RouteEmployees
-	bytes, err = c.doRequest(ctx, uri, http.MethodPut, bytes)
+	bytes, err = c.doRequest(correlationId, ctx, uri, http.MethodPut, bytes)
 	if err != nil {
 		return nil, err
 	}
@@ -186,16 +229,22 @@ func (c *Client) EmployeeCreate(ctx context.Context, employeePartial data.Employ
 	return response.Employee, nil
 }
 
-func (c *Client) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error) {
+func (c *client) EmployeeRead(correlationId string, ctx context.Context, empNo int64) (*data.Employee, error) {
+	timerIndex := c.Start("employee_read")
+	defer func() {
+		elapsedtime := c.Stop("employee_read", timerIndex)
+		c.Trace(correlationId, "employee_read took %v",
+			time.Duration(elapsedtime)*time.Nanosecond)
+	}()
 	if !c.config.cacheDisabled {
-		employee, err := c.cache.EmployeeRead(ctx, empNo)
+		employee, err := c.cache.EmployeeRead(correlationId, ctx, empNo)
 		if err == nil {
 			return employee, nil
 		}
-		fmt.Printf("error while reading employee (%d) from cache: %s\n", empNo, err)
+		c.Error(correlationId, "error while reading employee (%d) from cache: %s\n", empNo, err)
 	}
 	uri := fmt.Sprintf(c.address+data.RouteEmployeesEmpNof, empNo)
-	bytes, err := c.doRequest(ctx, uri, http.MethodGet, nil)
+	bytes, err := c.doRequest(correlationId, ctx, uri, http.MethodGet, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -204,26 +253,32 @@ func (c *Client) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee,
 		return nil, err
 	}
 	if !c.config.cacheDisabled {
-		if err := c.cache.EmployeesWrite(ctx, data.EmployeeSearch{}, response.Employee); err != nil {
-			fmt.Printf("error while writing employee (%d) to cache: %s\n", empNo, err)
+		if err := c.cache.EmployeesWrite(correlationId, ctx, data.EmployeeSearch{}, response.Employee); err != nil {
+			c.Error(correlationId, "error while writing employee (%d) to cache: %s\n", empNo, err)
 		}
 	}
 	return response.Employee, nil
 }
 
-func (c *Client) EmployeesSearch(ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error) {
+func (c *client) EmployeesSearch(correlationId string, ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error) {
 	var response data.Response
 
+	timerIndex := c.Start("employees_search")
+	defer func() {
+		elapsedtime := c.Stop("employees_search", timerIndex)
+		c.Trace(correlationId, "employees_search took %v",
+			time.Duration(elapsedtime)*time.Nanosecond)
+	}()
 	if !c.config.cacheDisabled {
-		employees, err := c.cache.EmployeesRead(ctx, search)
+		employees, err := c.cache.EmployeesRead(correlationId, ctx, search)
 		if err == nil {
 			return employees, nil
 		}
-		fmt.Printf("error while reading employees from cache: %s\n", err)
+		c.Error(correlationId, "error while reading employees from cache: %s\n", err)
 	}
 	params := search.ToParams()
 	uri := c.address + data.RouteEmployeesSearch
-	bytes, err := c.doRequest(ctx, uri, http.MethodGet, params)
+	bytes, err := c.doRequest(correlationId, ctx, uri, http.MethodGet, params)
 	if err != nil {
 		return nil, err
 	}
@@ -231,20 +286,26 @@ func (c *Client) EmployeesSearch(ctx context.Context, search data.EmployeeSearch
 		return nil, err
 	}
 	if !c.config.cacheDisabled {
-		if err := c.cache.EmployeesWrite(ctx, search, response.Employees...); err != nil {
-			fmt.Printf("error while writing employees to cache: %s\n", err)
+		if err := c.cache.EmployeesWrite(correlationId, ctx, search, response.Employees...); err != nil {
+			c.Error(correlationId, "error while writing employees to cache: %s\n", err)
 		}
 	}
 	return response.Employees, nil
 }
 
-func (c *Client) EmployeeUpdate(ctx context.Context, empNo int64, employeePartial data.EmployeePartial) (*data.Employee, error) {
+func (c *client) EmployeeUpdate(correlationId string, ctx context.Context, empNo int64, employeePartial data.EmployeePartial) (*data.Employee, error) {
+	timerIndex := c.Start("employee_update")
+	defer func() {
+		elapsedtime := c.Stop("employee_update", timerIndex)
+		c.Trace(correlationId, "employee_update took %v",
+			time.Duration(elapsedtime)*time.Nanosecond)
+	}()
 	bytes, err := json.Marshal(&data.Request{EmployeePartial: employeePartial})
 	if err != nil {
 		return nil, err
 	}
 	uri := fmt.Sprintf(c.address+data.RouteEmployeesEmpNof, empNo)
-	bytes, err = c.doRequest(ctx, uri, http.MethodPost, bytes)
+	bytes, err = c.doRequest(correlationId, ctx, uri, http.MethodPost, bytes)
 	if err != nil {
 		return nil, err
 	}
@@ -253,21 +314,27 @@ func (c *Client) EmployeeUpdate(ctx context.Context, empNo int64, employeePartia
 		return nil, err
 	}
 	if !c.config.cacheDisabled {
-		if err := c.cache.EmployeesDelete(ctx, empNo); err != nil {
-			fmt.Printf("error while deleting employee (%d) from cache: %s\n", empNo, err)
+		if err := c.cache.EmployeesDelete(correlationId, ctx, empNo); err != nil {
+			c.Error(correlationId, "error while deleting employee (%d) from cache: %s\n", empNo, err)
 		}
 	}
 	return response.Employee, nil
 }
 
-func (c *Client) EmployeeDelete(ctx context.Context, empNo int64) error {
+func (c *client) EmployeeDelete(correlationId string, ctx context.Context, empNo int64) error {
+	timerIndex := c.Start("employee_delete")
+	defer func() {
+		elapsedtime := c.Stop("employee_delete", timerIndex)
+		c.Trace(correlationId, "employee_delete took %v",
+			time.Duration(elapsedtime)*time.Nanosecond)
+	}()
 	uri := fmt.Sprintf(c.address+data.RouteEmployeesEmpNof, empNo)
-	if _, err := c.doRequest(ctx, uri, http.MethodDelete, nil); err != nil {
+	if _, err := c.doRequest(correlationId, ctx, uri, http.MethodDelete, nil); err != nil {
 		return err
 	}
 	if !c.config.cacheDisabled {
-		if err := c.cache.EmployeesDelete(ctx, empNo); err != nil {
-			fmt.Printf("error while deleting employee (%d) from cache: %s\n", empNo, err)
+		if err := c.cache.EmployeesDelete(correlationId, ctx, empNo); err != nil {
+			c.Error(correlationId, "error while deleting employee (%d) from cache: %s\n", empNo, err)
 		}
 	}
 	return nil

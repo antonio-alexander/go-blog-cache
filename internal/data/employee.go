@@ -1,6 +1,8 @@
 package data
 
-import "encoding/json"
+import (
+	"encoding/json"
+)
 
 type Employee struct {
 	EmpNo     int64  `json:"emp_no"` //this is actually an int32, but the types are compatible

@@ -29,11 +29,15 @@ ARG GIT_COMMIT
 ARG GO_ARCH
 ARG GO_ARM
 
+RUN apk add jq
+
 WORKDIR /go/src/go-blog-cache
 
-COPY . /go/src/go-blog-cache
+COPY ./go.mod /go/src/go-blog-cache/go.mod
 
-RUN apk add jq
+RUN go mod download
+
+COPY . /go/src/go-blog-cache
 
 RUN \
     VERSION=`cat /go/src/go-blog-cache/version.json | jq '.version' | sed 's/"//g'` \

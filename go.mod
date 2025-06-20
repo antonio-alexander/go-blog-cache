@@ -3,6 +3,7 @@ module github.com/antonio-alexander/go-blog-cache
 go 1.23
 
 require (
+	github.com/antonio-alexander/go-stash v1.1.1
 	github.com/go-sql-driver/mysql v1.8.1
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.1

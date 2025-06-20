@@ -13,6 +13,10 @@ import (
 	"github.com/antonio-alexander/go-blog-cache/internal/client"
 	"github.com/antonio-alexander/go-blog-cache/internal/data"
 	"github.com/antonio-alexander/go-blog-cache/internal/sql"
+	"github.com/antonio-alexander/go-blog-cache/internal/utilities"
+
+	"github.com/antonio-alexander/go-stash/memory"
+	"github.com/antonio-alexander/go-stash/redis"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -23,7 +27,6 @@ var (
 		"REDIS_ADDRESS": "localhost",
 		"REDIS_PORT":    "6379",
 		"REDIS_TIMEOUT": "10",
-
 		//client
 		"CLIENT_ADDRESS":  "localhost",
 		"CLIENT_PORT":     "8080",
@@ -33,6 +36,8 @@ var (
 		"SSL_KEY_FILE":    "",
 		"SSL_CRT_FILE":    "",
 		"CACHE_DISABLED":  "false",
+		//logger
+		"LOGGING_LEVEL": "trace",
 	}
 )
 
@@ -45,59 +50,49 @@ func init() {
 }
 
 type clientTest struct {
-	cache cache.Cache
-	*client.Client
+	cache        cache.Cache
+	logger       utilities.Logger
+	cacheCounter utilities.CacheCounter
+	timers       utilities.Timers
+	client.Client
 }
 
 func newClientTest(cacheType string) *clientTest {
-	var c cache.Cache
+	var employeeCache cache.Cache
 
-	sql := sql.NewSql()
+	cacheCounter := utilities.NewCacheCounter()
+	timers := utilities.NewTimers()
+	logger := utilities.NewLogger()
+	sql := sql.NewSql(logger)
 	switch cacheType {
 	case "memory":
-		c = cache.NewMemory()
+		employeeCache = cache.NewMemory(logger, cacheCounter)
 	case "redis":
-		c = cache.NewRedis()
+		employeeCache = cache.NewRedis(logger, cacheCounter)
+	case "stash-memory":
+		stash := memory.New()
+		employeeCache = cache.NewStash(logger, cacheCounter, stash)
+	case "stash-redis":
+		stash := redis.New()
+		employeeCache = cache.NewStash(logger, cacheCounter, stash)
 	}
-	client := client.NewClient(sql, c)
+	client := client.NewClient(sql, employeeCache, logger, timers)
 	return &clientTest{
-		cache:  c,
-		Client: client,
+		cache:        employeeCache,
+		logger:       logger,
+		cacheCounter: cacheCounter,
+		timers:       timers,
+		Client:       client,
 	}
 }
 
-func (c *clientTest) Configure(envs map[string]string) error {
-	if err := c.cache.Configure(envs); err != nil {
-		return err
-	}
-	if err := c.Client.Configure(envs); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (c *clientTest) Open() error {
-	if err := c.cache.Open(); err != nil {
-		return err
-	}
-	if err := c.Client.Open(); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (c *clientTest) Close() error {
-	if err := c.cache.Close(); err != nil {
-		return err
-	}
-	if err := c.Client.Close(); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (c *clientTest) TestClient(cacheDisabled bool) func(t *testing.T) {
+func (c *clientTest) testClient(cacheDisabled bool) func(t *testing.T) {
 	return func(t *testing.T) {
+
+		//generate correlationId
+		correlationId := internal.GenerateId()
+		t.Logf("correlation id: %s", correlationId)
+
 		// generate context
 		ctx := context.TODO()
 
@@ -106,7 +101,7 @@ func (c *clientTest) TestClient(cacheDisabled bool) func(t *testing.T) {
 		firstName := internal.GenerateId()[:14]
 		lastName := internal.GenerateId()[:16]
 		gender := "M"
-		employeeCreated, err := c.EmployeeCreate(ctx, data.EmployeePartial{
+		employeeCreated, err := c.EmployeeCreate(correlationId, ctx, data.EmployeePartial{
 			BirthDate: &birthDate,
 			FirstName: &firstName,
 			LastName:  &lastName,
@@ -117,25 +112,25 @@ func (c *clientTest) TestClient(cacheDisabled bool) func(t *testing.T) {
 		assert.NotNil(t, employeeCreated)
 		empNo := employeeCreated.EmpNo
 		defer func(empNo int64) {
-			_ = c.EmployeeDelete(ctx, empNo)
+			_ = c.EmployeeDelete(correlationId, ctx, empNo)
 		}(empNo)
 
 		if !cacheDisabled {
 			// validate that employee not in cache
-			employeeCached, err := c.cache.EmployeeRead(ctx, empNo)
+			employeeCached, err := c.cache.EmployeeRead(correlationId, ctx, empNo)
 			assert.NotNil(t, err)
 			assert.Nil(t, employeeCached)
 		}
 
 		// read employee
-		employeeRead, err := c.EmployeeRead(ctx, empNo)
+		employeeRead, err := c.EmployeeRead(correlationId, ctx, empNo)
 		assert.Nil(t, err)
 		assert.NotNil(t, employeeRead)
 		assert.Equal(t, employeeCreated, employeeRead)
 
 		// validate that employee in cache
 		if !cacheDisabled {
-			employeeCached, err := c.cache.EmployeeRead(ctx, empNo)
+			employeeCached, err := c.cache.EmployeeRead(correlationId, ctx, empNo)
 			assert.Nil(t, err)
 			assert.NotNil(t, employeeCached)
 			assert.Equal(t, employeeCreated, employeeCached)
@@ -144,7 +139,7 @@ func (c *clientTest) TestClient(cacheDisabled bool) func(t *testing.T) {
 		// update employee
 		updatedFirstName := internal.GenerateId()[:14]
 		updatedLastName := internal.GenerateId()[:16]
-		employeeUpdated, err := c.EmployeeUpdate(ctx, empNo, data.EmployeePartial{
+		employeeUpdated, err := c.EmployeeUpdate(correlationId, ctx, empNo, data.EmployeePartial{
 			FirstName: &updatedFirstName,
 			LastName:  &updatedLastName,
 		})
@@ -153,35 +148,70 @@ func (c *clientTest) TestClient(cacheDisabled bool) func(t *testing.T) {
 
 		// validate that employee not in cache
 		if !cacheDisabled {
-			employeeCached, err := c.cache.EmployeeRead(ctx, empNo)
+			employeeCached, err := c.cache.EmployeeRead(correlationId, ctx, empNo)
 			assert.NotNil(t, err)
 			assert.Nil(t, employeeCached)
 		}
 
 		// read employee
-		employeeRead, err = c.EmployeeRead(ctx, empNo)
+		employeeRead, err = c.EmployeeRead(correlationId, ctx, empNo)
 		assert.Nil(t, err)
 		assert.NotNil(t, employeeRead)
 		assert.Equal(t, employeeUpdated, employeeRead)
 
 		// validate that employee in cache
 		if !cacheDisabled {
-			employeeCached, err := c.cache.EmployeeRead(ctx, empNo)
+			employeeCached, err := c.cache.EmployeeRead(correlationId, ctx, empNo)
 			assert.Nil(t, err)
 			assert.NotNil(t, employeeCached)
 			assert.Equal(t, employeeUpdated, employeeCached)
 		}
 
 		// delete employee
-		err = c.EmployeeDelete(ctx, empNo)
+		err = c.EmployeeDelete(correlationId, ctx, empNo)
 		assert.Nil(t, err)
 		if !cacheDisabled {
 			// validate that employee not in cache
-			employeeCached, err := c.cache.EmployeeRead(ctx, empNo)
+			employeeCached, err := c.cache.EmployeeRead(correlationId, ctx, empNo)
 			assert.NotNil(t, err)
 			assert.Nil(t, employeeCached)
 		}
 	}
+}
+
+func (c *clientTest) Configure(envs map[string]string) error {
+	if err := c.logger.Configure(envs); err != nil {
+		return err
+	}
+	if err := c.cache.Configure(envs); err != nil {
+		return err
+	}
+	if err := c.Client.Configure(envs); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *clientTest) Open() error {
+	correlationId := "client_test"
+	if err := c.cache.Open(correlationId); err != nil {
+		return err
+	}
+	if err := c.Client.Open(correlationId); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *clientTest) Close() error {
+	correlationId := "client_test"
+	if err := c.cache.Close(correlationId); err != nil {
+		return err
+	}
+	if err := c.Client.Close(correlationId); err != nil {
+		return err
+	}
+	return nil
 }
 
 func testClient(t *testing.T, cacheType string) {
@@ -201,7 +231,7 @@ func testClient(t *testing.T, cacheType string) {
 			t.Logf("error while closing testClient: %s", err)
 		}
 	}()
-	t.Run("Client", c.TestClient(cacheDisabled))
+	t.Run("Client", c.testClient(cacheDisabled))
 }
 
 func TestClientMemory(t *testing.T) {
@@ -210,4 +240,12 @@ func TestClientMemory(t *testing.T) {
 
 func TestClientRedis(t *testing.T) {
 	testClient(t, "redis")
+}
+
+func TestClientStashMemory(t *testing.T) {
+	testClient(t, "stash-memory")
+}
+
+func TestClientStashRedis(t *testing.T) {
+	testClient(t, "stash-redis")
 }

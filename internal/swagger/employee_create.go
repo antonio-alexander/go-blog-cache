@@ -22,6 +22,9 @@ type EmployeePutResponseOk struct {
 
 // swagger:parameters CreateEmployee
 type EmployeePutParams struct {
+	// in:header
+	CorrelationId string `json:"Correlation-Id"`
+
 	// in:body
 	EmployeePartial data.EmployeePartial `json:"employee_partial"`
 }
