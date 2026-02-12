@@ -22,6 +22,9 @@ type EmployeeGetResponseOk struct {
 
 // swagger:parameters ReadEmployee
 type EmployeeGetParams struct {
+	// in:header
+	CorrelationId string `json:"Correlation-Id"`
+
 	// in:path
 	EmpNo string `json:"emp_no"`
 }

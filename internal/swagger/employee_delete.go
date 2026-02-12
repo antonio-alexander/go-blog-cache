@@ -13,12 +13,13 @@ package swagger
 //   200: EmployeeDeleteResponseOk
 
 // swagger:response EmployeeDeleteResponseOk
-type EmployeeDeleteResponseOk struct {
-	//
-}
+type EmployeeDeleteResponseOk struct{}
 
 // swagger:parameters DeleteEmployee
 type EmployeeDeleteParams struct {
+	// in:header
+	CorrelationId string `json:"Correlation-Id"`
+
 	// in:path
 	EmpNo string `json:"emp_no"`
 }
