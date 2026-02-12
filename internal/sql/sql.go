@@ -10,7 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/antonio-alexander/go-blog-cache/internal"
 	"github.com/antonio-alexander/go-blog-cache/internal/data"
+	"github.com/antonio-alexander/go-blog-cache/internal/utilities"
 
 	_ "github.com/go-sql-driver/mysql" //import for driver support
 )
@@ -21,9 +23,16 @@ const (
 	tableEmployees    = "employees"
 )
 
-type Sql struct {
+type Sql interface {
+	EmployeeCreate(ctx context.Context, employeePartial data.EmployeePartial) (*data.Employee, error)
+	EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error)
+	EmployeesSearch(ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error)
+	EmployeeUpdate(ctx context.Context, empNo int64, employeePartial data.EmployeePartial) (*data.Employee, error)
+	EmployeeDelete(ctx context.Context, empNo int64) error
+}
+
+type mySql struct {
 	sync.RWMutex
-	*sql.DB
 	config struct {
 		Hostname       string        `json:"hostname"`
 		Port           string        `json:"port"`
@@ -34,14 +43,27 @@ type Sql struct {
 		QueryTimeout   time.Duration `json:"query_timeout"`
 		ParseTime      bool          `json:"parse_time"`
 	}
+	*sql.DB
+	utilities.Logger
 	opened bool
 }
 
-func NewSql(parameters ...interface{}) *Sql {
-	return &Sql{}
+func NewMySql(parameters ...any) interface {
+	internal.Configurer
+	internal.Opener
+	Sql
+} {
+	m := &mySql{}
+	for _, parameter := range parameters {
+		switch v := parameter.(type) {
+		case utilities.Logger:
+			m.Logger = v
+		}
+	}
+	return m
 }
 
-func (s *Sql) Configure(envs map[string]string) error {
+func (s *mySql) Configure(envs map[string]string) error {
 	if databaseHost := envs["DATABASE_HOST"]; databaseHost != "" {
 		s.config.Hostname = databaseHost
 	}
@@ -67,9 +89,7 @@ func (s *Sql) Configure(envs map[string]string) error {
 	return nil
 }
 
-func (s *Sql) Open() error {
-	//EXAMPLE: [username[:password]@][protocol[(address)]]/dbname[?param1=value1&...&paramN=valueN]
-	// user:password@tcp(localhost:5555)/dbname?charset=utf8
+func (s *mySql) Open(ctx context.Context) error {
 	dataSourceName := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=%t",
 		s.config.Username, s.config.Password, s.config.Hostname,
 		s.config.Port, s.config.Database, s.config.ParseTime)
@@ -85,19 +105,19 @@ func (s *Sql) Open() error {
 	return nil
 }
 
-func (s *Sql) Close() error {
+func (s *mySql) Close(ctx context.Context) error {
 	if !s.opened {
 		return nil
 	}
 	if err := s.DB.Close(); err != nil {
-		fmt.Printf("error while closing sql: %s\n", err)
+		s.Error(ctx, "error while closing sql: %s", err)
 	}
 	return nil
 }
 
-func (s *Sql) EmployeeCreate(ctx context.Context, employeePartial data.EmployeePartial) (*data.Employee, error) {
+func (s *mySql) EmployeeCreate(ctx context.Context, employeePartial data.EmployeePartial) (*data.Employee, error) {
 	var columns, values []string
-	var args []interface{}
+	var args []any
 
 	if employeePartial.BirthDate != nil {
 		args = append(args, time.Unix(*employeePartial.BirthDate, 0))
@@ -139,7 +159,7 @@ func (s *Sql) EmployeeCreate(ctx context.Context, employeePartial data.EmployeeP
 	return s.EmployeeRead(ctx, empNo)
 }
 
-func (s *Sql) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error) {
+func (s *mySql) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error) {
 	query := fmt.Sprintf(`SELECT emp_no, birth_date, first_name, last_name,
 		gender, hire_date FROM %s WHERE emp_no = ?;`,
 		tableEmployees)
@@ -151,7 +171,7 @@ func (s *Sql) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, er
 	return employee, nil
 }
 
-func (s *Sql) EmployeesSearch(ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error) {
+func (s *mySql) EmployeesSearch(ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error) {
 	var employees []*data.Employee
 
 	criteria, args := employeeCriteria(search)
@@ -172,8 +192,8 @@ func (s *Sql) EmployeesSearch(ctx context.Context, search data.EmployeeSearch) (
 	return employees, nil
 }
 
-func (s *Sql) EmployeeUpdate(ctx context.Context, empNo int64, employeePartial data.EmployeePartial) (*data.Employee, error) {
-	var args []interface{}
+func (s *mySql) EmployeeUpdate(ctx context.Context, empNo int64, employeePartial data.EmployeePartial) (*data.Employee, error) {
+	var args []any
 	var updates []string
 
 	if employeePartial.BirthDate != nil {
@@ -205,7 +225,7 @@ func (s *Sql) EmployeeUpdate(ctx context.Context, empNo int64, employeePartial d
 	return s.EmployeeRead(ctx, empNo)
 }
 
-func (s *Sql) EmployeeDelete(ctx context.Context, empNo int64) error {
+func (s *mySql) EmployeeDelete(ctx context.Context, empNo int64) error {
 	query := fmt.Sprintf(`DELETE FROM %s WHERE emp_no = ?;`,
 		tableEmployees)
 	result, err := s.ExecContext(ctx, query, empNo)

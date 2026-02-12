@@ -2,6 +2,7 @@ package internal
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
@@ -102,4 +104,30 @@ func GetTlsConfig(certFile, keyFile, caCertFile string) (*tls.Config, error) {
 		RootCAs:      caCertPool,
 		Certificates: []tls.Certificate{certificate},
 	}, nil
+}
+
+func LaunchContext(wg *sync.WaitGroup, osSignal chan os.Signal) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		close(started)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-osSignal:
+				select {
+				default:
+					cancel()
+				case <-ctx.Done():
+				}
+				return
+			}
+		}
+	}()
+	<-started
+	return ctx, cancel
 }

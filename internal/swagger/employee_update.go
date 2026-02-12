@@ -27,4 +27,7 @@ type EmployeePostParams struct {
 
 	// in:body
 	EmployeePartial data.EmployeePartial `json:"employee_partial"`
+
+	// in:header
+	CorrelationId string `json:"Correlation-Id"`
 }

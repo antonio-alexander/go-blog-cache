@@ -1,17 +1,23 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 
+	"github.com/antonio-alexander/go-blog-cache/internal"
 	"github.com/antonio-alexander/go-blog-cache/internal/cache"
 	"github.com/antonio-alexander/go-blog-cache/internal/data"
 	"github.com/antonio-alexander/go-blog-cache/internal/logic"
 	"github.com/antonio-alexander/go-blog-cache/internal/service"
 	"github.com/antonio-alexander/go-blog-cache/internal/sql"
+	"github.com/antonio-alexander/go-blog-cache/internal/utilities"
+
+	"github.com/antonio-alexander/go-stash/memory"
+	"github.com/antonio-alexander/go-stash/redis"
 )
 
 var (
@@ -49,61 +55,103 @@ func main() {
 	}
 }
 
+func createCache(envs map[string]string, parameters ...any) interface {
+	internal.Configurer
+	internal.Opener
+	internal.Clearer
+	cache.Cache
+} {
+	switch envs["CACHE_TYPE"] {
+	default:
+		return nil
+	case "memory":
+		return cache.NewMemory(parameters...)
+	case "redis":
+		return cache.NewRedis(parameters...)
+	case "stash-memory":
+		stash := memory.New()
+		_ = stash.Configure(envs)
+		parameters = append(parameters, stash)
+		return cache.NewStash(parameters...)
+	case "stash-redis":
+		stash := redis.New()
+		_ = stash.Configure(envs)
+		parameters = append(parameters, stash)
+		return cache.NewStash(parameters...)
+	}
+}
+
 func Main(pwd string, args []string, envs map[string]string, osSignal chan os.Signal) error {
-	fmt.Printf("service: go-blog-cache v%s (%s) built from: %s\n",
+	var wg sync.WaitGroup
+
+	//create context
+	ctx, cancel := internal.LaunchContext(&wg, osSignal)
+	defer cancel()
+
+	// create utilities
+	logger := utilities.NewLogger()
+	_ = logger.Configure(envs)
+	timers := utilities.NewTimers()
+	counter := utilities.NewCounter()
+
+	//print version info
+	logger.Info(ctx, "server: go-blog-cache v%s (%s) built from: %s",
 		Version, GitCommit, GitBranch)
 
 	//create sql, configure and open
-	sql := sql.NewSql()
+	sql := sql.NewMySql(logger)
 	if err := sql.Configure(envs); err != nil {
 		return err
 	}
-	if err := sql.Open(); err != nil {
+	if err := sql.Open(ctx); err != nil {
 		return err
 	}
 	defer func() {
-		if err := sql.Close(); err != nil {
-			fmt.Printf("error while closing sql: %s\n", err)
+		if err := sql.Close(ctx); err != nil {
+			logger.Error(context.Background(), "error while closing sql: %s", err)
 		}
 	}()
 
 	// create cache
-	cache := cache.NewRedis()
-	if err := cache.Configure(envs); err != nil {
-		return err
-	}
-	if err := cache.Open(); err != nil {
-		return err
-	}
-	defer func() {
-		if err := cache.Close(); err != nil {
-			fmt.Printf("error while closing cache: %s\n", err)
+	cache := createCache(envs, logger)
+	if cache != nil {
+		if err := cache.Configure(envs); err != nil {
+			return err
 		}
-	}()
+		if err := cache.Open(ctx); err != nil {
+			return err
+		}
+		defer func() {
+			if err := cache.Close(context.Background()); err != nil {
+				logger.Error(context.Background(), "error while closing cache: %s", err)
+			}
+		}()
+	}
 
 	//create logic, configure and open
-	logic := logic.NewLogic(sql)
+	logic := logic.NewLogic(sql, logger, counter, cache)
 	if err := logic.Configure(envs); err != nil {
 		return err
 	}
-	if err := logic.Open(); err != nil {
+	if err := logic.Open(ctx); err != nil {
 		return err
 	}
 	defer func() {
-		if err := logic.Close(); err != nil {
-			fmt.Printf("error while closing logic: %s\n", err)
+		if err := logic.Close(context.Background()); err != nil {
+			logger.Error(context.Background(), "error while closing logic: %s", err)
 		}
 	}()
 
 	//create service, configure and open
-	service := service.NewService(logic, cache)
+	service := service.NewService(logic, cache, logger, counter, timers)
 	if err := service.Configure(envs); err != nil {
 		return err
 	}
-	if err := service.Open(); err != nil {
+	if err := service.Open(ctx); err != nil {
 		return err
 	}
-	<-osSignal
-	service.Close()
+	<-ctx.Done()
+	wg.Wait()
+	service.Close(context.Background())
 	return nil
 }

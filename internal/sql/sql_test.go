@@ -35,12 +35,17 @@ func init() {
 }
 
 type sqlTest struct {
-	*sql.Sql
+	sql interface {
+		internal.Opener
+		internal.Configurer
+	}
+	sql.Sql
 }
 
 func newSqlTest() *sqlTest {
-	sql := sql.NewSql()
+	sql := sql.NewMySql()
 	return &sqlTest{
+		sql: sql,
 		Sql: sql,
 	}
 }
@@ -127,16 +132,17 @@ func (s *sqlTest) TestSql(t *testing.T) {
 func testSql(t *testing.T) {
 	c := newSqlTest()
 
-	err := c.Configure(envs)
+	ctx := context.TODO()
+	err := c.sql.Configure(envs)
 	if !assert.Nil(t, err) {
 		assert.FailNow(t, "unable to configure sqlTest")
 	}
-	err = c.Open()
+	err = c.sql.Open(ctx)
 	if !assert.Nil(t, err) {
 		assert.FailNow(t, "unable to open sqlTest")
 	}
 	defer func() {
-		c.Close()
+		_ = c.sql.Close(ctx)
 	}()
 	t.Run("Sql", c.TestSql)
 }

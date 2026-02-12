@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -58,18 +59,38 @@ func init() {
 }
 
 type serviceTest struct {
-	sql    *sql.Sql
-	cache  cache.Cache
-	logic  *logic.Logic
-	client *http.Client
-	*service.Service
+	sql interface {
+		internal.Configurer
+		internal.Opener
+		sql.Sql
+	}
+	cache interface {
+		internal.Configurer
+		internal.Opener
+		cache.Cache
+	}
+	logic interface {
+		internal.Configurer
+		internal.Opener
+		logic.Logic
+	}
+	service interface {
+		internal.Configurer
+		internal.Opener
+	}
+	client  *http.Client
 	address string
 }
 
 func newServiceTest(cacheType string) *serviceTest {
-	var c cache.Cache
+	var c interface {
+		internal.Opener
+		internal.Configurer
+		internal.Clearer
+		cache.Cache
+	}
 
-	sql := sql.NewSql()
+	sql := sql.NewMySql()
 	switch cacheType {
 	case "memory":
 		c = cache.NewMemory()
@@ -83,7 +104,7 @@ func newServiceTest(cacheType string) *serviceTest {
 		cache:   c,
 		logic:   logic,
 		client:  &http.Client{},
-		Service: service,
+		service: service,
 	}
 }
 
@@ -97,7 +118,7 @@ func (s *serviceTest) Configure(envs map[string]string) error {
 	if err := s.logic.Configure(envs); err != nil {
 		return err
 	}
-	if err := s.Service.Configure(envs); err != nil {
+	if err := s.service.Configure(envs); err != nil {
 		return err
 	}
 	s.address = "http://" + envs["SERVICE_ADDRESS"]
@@ -107,33 +128,33 @@ func (s *serviceTest) Configure(envs map[string]string) error {
 	return nil
 }
 
-func (s *serviceTest) Open() error {
-	if err := s.sql.Open(); err != nil {
+func (s *serviceTest) Open(ctx context.Context) error {
+	if err := s.sql.Open(ctx); err != nil {
 		return err
 	}
-	if err := s.cache.Open(); err != nil {
+	if err := s.cache.Open(ctx); err != nil {
 		return err
 	}
-	if err := s.logic.Open(); err != nil {
+	if err := s.logic.Open(ctx); err != nil {
 		return err
 	}
-	if err := s.Service.Open(); err != nil {
+	if err := s.service.Open(ctx); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (s *serviceTest) Close() error {
-	if err := s.sql.Close(); err != nil {
+func (s *serviceTest) Close(ctx context.Context) error {
+	if err := s.sql.Close(ctx); err != nil {
 		return err
 	}
-	if err := s.cache.Close(); err != nil {
+	if err := s.cache.Close(ctx); err != nil {
 		return err
 	}
-	if err := s.logic.Close(); err != nil {
+	if err := s.logic.Close(ctx); err != nil {
 		return err
 	}
-	if err := s.Service.Close(); err != nil {
+	if err := s.service.Close(ctx); err != nil {
 		return err
 	}
 	return nil
@@ -205,16 +226,17 @@ func (s *serviceTest) TestService(t *testing.T) {
 func testService(t *testing.T, cacheType string) {
 	c := newServiceTest(cacheType)
 
+	ctx := context.TODO()
 	err := c.Configure(envs)
 	if !assert.Nil(t, err) {
 		assert.FailNow(t, "unable to configure testService")
 	}
-	err = c.Open()
+	err = c.Open(ctx)
 	if !assert.Nil(t, err) {
 		assert.FailNow(t, "unable to open testService")
 	}
 	defer func() {
-		if err := c.Close(); err != nil {
+		if err := c.Close(ctx); err != nil {
 			t.Logf("error while closing testService: %s", err)
 		}
 	}()

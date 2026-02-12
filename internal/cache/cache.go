@@ -2,35 +2,29 @@ package cache
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
-	"encoding/json"
+	"errors"
 
 	"github.com/antonio-alexander/go-blog-cache/internal/data"
 )
+
+var (
+	ErrEmployeeNotCached         = errors.New("employee not cached")
+	ErrEmployeeSearchNotCached   = errors.New("employee search not cached")
+	ErrEmployeeReadSet           = errors.New("employee not cached, read set")
+	ErrEmployeeReadAlreadySet    = errors.New("employee not cached, read already set")
+	ErrEmployeesSearchSet        = errors.New("employees search not cached, read set")
+	ErrEmployeesSearchAlreadySet = errors.New("employees search not cached, read already set")
+)
+
+type Cache interface {
+	EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error)
+	EmployeesRead(ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error)
+	EmployeesWrite(ctx context.Context, search data.EmployeeSearch, employees ...*data.Employee) error
+	EmployeesDelete(ctx context.Context, empNos ...int64) error
+}
 
 func copyEmployee(e *data.Employee) *data.Employee {
 	employee := &data.Employee{}
 	*employee = *e
 	return employee
-}
-
-func searchToKey(search data.EmployeeSearch) (string, error) {
-	bytes, err := json.Marshal(search)
-	if err != nil {
-		return "", err
-	}
-	hash := md5.Sum(bytes)
-	return hex.EncodeToString(hash[:]), nil
-}
-
-type Cache interface {
-	Configure(envs map[string]string) error
-	Open() error
-	Close() error
-	Clear(ctx context.Context) error
-	EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error)
-	EmployeesRead(ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error)
-	EmployeesWrite(ctx context.Context, search data.EmployeeSearch, es ...*data.Employee) error
-	EmployeesDelete(ctx context.Context, empNos ...int64) error
 }

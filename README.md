@@ -17,6 +17,8 @@ Here are some links that should be helpful and got me a lot of answers in this p
 - [https://medium.com/@cocm1324/implementing-cache-with-go-71e29fcdaf7](https://medium.com/@cocm1324/implementing-cache-with-go-71e29fcdaf7): this is good for showing how to implement a cache in Go (basics) and does a good job of describing cache eviction strategies
 - [https://github.com/antonio-alexander/go-stash](https://github.com/antonio-alexander/go-stash): this is an example of a general purpose (possibly over-engineered) caching solution
 - [http://github.com/antonio-alexander/sql-blog-indexing](http://github.com/antonio-alexander/sql-blog-indexing): further down, I mention that sometimes you can get the benefits of "redis" by optimizing your database and/or queries; this blog post goes through that effort and shows some practical examples/applications
+- [https://www.geeksforgeeks.org/computer-organization-architecture/types-of-cache-misses/](https://www.geeksforgeeks.org/computer-organization-architecture/types-of-cache-misses/): this describes some kinds of cache misses
+- [https://redis.io/glossary/cache-miss/](https://redis.io/glossary/cache-miss/):
 
 ## Getting Started
 
@@ -398,6 +400,46 @@ In addition, concurrency adds another layer of complexity, especially for curren
 
 Like any cache, there's a technological and practical limit to how much data you can (or want) to store in a cache. Because this is timeseries data rather than scalar object data you're more likely to push the size limits. This is compounded by the nature of the data itself, 1Hz data vs 10Hz data is an order of magnitude difference in storage space. Additionally, most timeseries API almost always allows you to get data from more than one tag, so the cache must be able to aggregate data from multiple tags for the same time range.
 
+## How to Solve Problems Created (or Exacerbated) By a Cache
+
+<!-- REVIEW: you mention store of record here, it's not for the first time, but it's the first time you call it that, maybe review the rest of the document and use that term more often? -->
+
+Caches are generally meant to solve the loading it places on the store of record; reading from redis (or memory) is generally faster than reading from the database and (within reason) scales better and/or is less expensive (either in complexity or actual cost). Unfortunately, implementing a cache creates it's own class of problems that may invalidate the performance benefit you're trying to get. Like most applications, problems occur during failure/failover and on certain edge cases around min/max modes (e.g., unexpected cache misses).
+
+<!-- TODO: add picture showing the period of attempting to read from the cache, maybe? -->
+
+It's easy to forget that at some point, your cache will be empty and un-initialized; that it won't contain any data that would be used by it's consumers (e.g. a cache hit). By design, when a cache miss occurs, data must be read from the store of record, in the event you have a high ratio of cache misses to cache hits, you _could_ overload the store of record or at least subject it to the load you're trying to prevent. When a cache is un-initialized, it will always result in a cache miss where upon your logic for loading the cache should initialize the cache.
+
+> Yes, you could pre-initialzie the cache, but this assumes that you know what to initialize it with; keeping in the spirit of only putting data in the cache that someone is interested in, it may not be reasonable to guess or copy the entire store of record into your cache
+
+This situation where the cache is empty can be exacerbated if you have a lot of concurrent consumers asking for data that can't be in the cache. Eventually, the cache will be initialized and emit a cache hit, but in the short term, all of those concurrent calls will failover to the store of record. This can happen when the store is empty, but also if an object (or group of objects) have been invalidated in the cache.
+
+Let's say, that you have 10 concurrent consumers reading the same data and you only load data in the cache that has been read (this makes this situation a bit more practical). In order to get data into the cache, you have to have a cache miss, then successfully read the data from the store of record and THEN store it in the cache. If those 10 concurrent consumers attempting to read the same data, all experience a cache miss, then they will failover to the store of record and then update the cache (possibly with the exact same data). This wastes CPU/memory and can create a cpu/memory spike both for the cache (read/write cycle) AND for the database.
+
+This is called a cache stampede or thundering herd problem. One way to solve this problem is to introduce a delay/retry into the cache read; maybe you should read (miss) and then try again after waiting for a period of time. This works, but introduces a mandatory delay (i.e., it doesn't fail fast). And this will occur __every__ time there's a cache miss which isn't ideal: you sacrifice user experience to protect the store of record.
+
+> This isn't to say that the database or store of record is somehow so fragile that it can't survive this situation, just that this is something you can reasonably mitigate.
+
+A better solution is to serialize those initial writes with logic (like one-shot mode on a [555 timer](https://en.wikipedia.org/wiki/555_timer_IC)); for the first consumer that encounters the cache miss, you atomically set a flag that the missed value is being read and then when other consumers encounter the miss, they see that it's being read, so they delay and retry a set number of times (before failing over to the store of record). Although complex, this introduces latency only in the situation where you have a cache miss and another consumer is already attempting to load the cache.
+
+This is something that _definitely_ matters at scale, but could also occur in sitautions where there's heavy mutation of data that multiple consumers are interested in (or some faulty search that creates the same _key_).
+
+See the output of this test without the one-shot logic:
+
+<!-- TODO: add output of the test with the logic disabled -->
+
+See the output of this test with the one-shot logic:
+
+<!-- TODO: add output of the test with the logic enabled -->
+
+This can be implemented at scale using the cache itself and will introduce initial latency when a cache miss occurs; if there's no heavy concurrent usage, there's no latency, but if there is, then latency is introduced; this is tactical and under most situations, won't hurt the user experience.
+
+Another issue/problem is the cache handling the concept of zero or 'no data'. Using the failover logic, if the data doesn't exist, you'll always get a cache miss and then you'll hit the database and it won't be in the record of store. So (by design) for data that doesn't exist, you'll always incur the maximum load. If _everyone_ were to try to read data that didn't exist...you would incur the maximum load on both your cache and the record of store. So in situations where that miss is practical and expected; you can cache that "miss" such that the cache returns a response that you can communicate and avoid hitting the store of record.
+
+For example, lets say I want to search for employees with the first name 'Frank', but no employees exist with that name. If I continue to perform that search, it'll always result in a miss such that i'll check the cache and the store: it'll completely bypass my caching logic. If this is something that happens often enough, you can resolve it, by caching this miss and returning it as a hit. It _still_ needs to be invalidated, possibly timer-based, but this way the cache can stabalize and you're not polling the store for something that doesn't exist (yet).
+
+<!-- TODO: cache miss by there being no data or concept of zero, talk about how it's difficult to represent "no data"; talk about situations where data is deleted and doesn't exist to place in the cache, so will always cause a database hit; talk about how to cache that a search (specifically) can result in empty data-->
+
 ## Frequently Asked Questions
 
 What are the advantages of placing a cache server-side? client-side? intermediary?
@@ -480,3 +522,11 @@ Is there a way we can totally prevent the cache from being wrong between the tim
 Since the client and server could share the same redis instance, wouldn't it be more efficient to have the client use the cache directly?
 
 > Yes, totally possible, but not without drawbacks. Elsewhere in this document, I've mentioned things about cache placement. Although it effectively reduces the number of hops to 1 and if data is in the cache it could _potentially_ have the best performance it comes with a handful of drawbacks: (1) shared cache on the client would mean that the cache would hold significantly more data that is less localized, (2) it's more likely for the cache to be incorrect since you could read faster and (3) you have to expose your redis instance to clients and this could increase the attack surface area
+
+How do you cache data that doesn't exist?
+
+> This certainly has some context, but if your cache logic doesn't recognize the concept of zero or 'not present', you can have some issues with cache normalization. If the data doesn't exist in the cache, it may "always" result in a cache miss and cause an unnecessary database hit (undoing the reduction in load you implemented the cache first)
+
+Are there ways to mitigate the stampeding herd problem without the complexity (and footprint) of complex one-shot logic?
+
+> Yes, although there may be something specific to your implementation that may make this not work; in general, if you can handle data being stale for a period of time and a __full__ read from your store of record, you can simply evict all of the data in the cache and replace it. You __must__ do this with logic not triggered by external endpoints (to avoid the stampeding herd problem). Implementing eviction logic __will not__ solve the stampeding herd problem, it will exacerbate it since it's possible for multiple consumers to ask for the missing data at the same time

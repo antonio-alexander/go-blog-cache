@@ -9,6 +9,10 @@ import (
 	"github.com/antonio-alexander/go-blog-cache/internal"
 	"github.com/antonio-alexander/go-blog-cache/internal/cache"
 	"github.com/antonio-alexander/go-blog-cache/internal/data"
+	"github.com/antonio-alexander/go-blog-cache/internal/utilities"
+
+	"github.com/antonio-alexander/go-stash/memory"
+	"github.com/antonio-alexander/go-stash/redis"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -17,6 +21,14 @@ var envs = map[string]string{
 	"REDIS_ADDRESS": "localhost",
 	"REDIS_PORT":    "6379",
 	"REDIS_TIMEOUT": "10",
+	//stash_memory
+	"STASH_EVICTION_POLICY": "least_recently_used",
+	"STASH_TIME_TO_LIVE":    "0",
+	"STASH_MAX_SIZE":        "5242880", //5MB
+	"STASH_DEBUG_ENABLED":   "false",
+	"STASH_DEBUG_PREFIX":    "stash ",
+	//stash_redis
+	"STASH_EVICTION_RATE": "1", //1s
 }
 
 func init() {
@@ -28,20 +40,39 @@ func init() {
 }
 
 type cacheTest struct {
+	cache interface {
+		internal.Opener
+		internal.Configurer
+		internal.Clearer
+	}
 	cache.Cache
 }
 
 func newCacheTest(cacheType string) *cacheTest {
-	var employeeCache cache.Cache
+	var employeeCache interface {
+		internal.Opener
+		internal.Configurer
+		internal.Clearer
+		cache.Cache
+	}
 
+	logger := utilities.NewLogger()
+	cacheCounter := utilities.NewCounter()
 	switch cacheType {
 	case "memory":
 		employeeCache = cache.NewMemory()
 	case "redis":
 		employeeCache = cache.NewRedis()
+	case "stash-memory":
+		employeeCache = cache.NewStash(logger, cacheCounter,
+			memory.New())
+	case "stash-redis":
+		employeeCache = cache.NewStash(logger, cacheCounter,
+			redis.New())
 	}
 	return &cacheTest{
 		Cache: employeeCache,
+		cache: employeeCache,
 	}
 }
 
@@ -81,7 +112,7 @@ func (c *cacheTest) TestCache(t *testing.T) {
 	ctx := context.TODO()
 
 	//clear cache
-	err := c.Clear(ctx)
+	err := c.cache.Clear(ctx)
 	assert.Nil(t, err)
 
 	// write employees
@@ -130,16 +161,17 @@ func (c *cacheTest) TestCache(t *testing.T) {
 func testCache(t *testing.T, cacheType string) {
 	c := newCacheTest(cacheType)
 
-	err := c.Configure(envs)
+	ctx := context.TODO()
+	err := c.cache.Configure(envs)
 	if !assert.Nil(t, err) {
 		assert.FailNow(t, "unable to configure cache")
 	}
-	err = c.Open()
+	err = c.cache.Open(ctx)
 	if !assert.Nil(t, err) {
 		assert.FailNow(t, "unable to open cache")
 	}
 	defer func() {
-		if err := c.Close(); err != nil {
+		if err := c.cache.Close(ctx); err != nil {
 			t.Logf("error while closing cache: %s", err)
 		}
 	}()
@@ -152,4 +184,8 @@ func TestCacheMemory(t *testing.T) {
 
 func TestCacheRedis(t *testing.T) {
 	testCache(t, "redis")
+}
+
+func TestCacheStash(t *testing.T) {
+	testCache(t, "stash")
 }
