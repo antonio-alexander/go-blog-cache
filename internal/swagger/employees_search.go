@@ -24,4 +24,7 @@ type EmployeeSearchGetResponseOk struct {
 type EmployeeSearchGetParams struct {
 	// in:query
 	data.EmployeeSearch
+
+	// in:header
+	CorrelationId string `json:"Correlation-Id"`
 }

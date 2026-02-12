@@ -21,6 +21,7 @@
                 "SERVICE_CORS_DISABLED": "",
                 "SERVICE_CORS_ALLOWED_ORIGINS": "*",
                 "SERVICE_CORS_ALLOWED_METHODS": "POST,PUT,GET,DELETE,PATCH",
+                "SERVICE_CORS_ALLOWED_HEADERS": "Correlation-Id",
                 "SERVICE_CACHE_ENABLED": "true",
                 "SSL_CA_FILE": "",
                 "SSL_KEY_FILE": "./certs/ssl.key",
@@ -36,19 +37,32 @@
                 "STASH_DEBUG": "true",
                 "STASH_DEBUG_PREFIX": "service",
                 "STASH_EVICTION_RATE": "60",
+                "CACHE_TYPE": "memory", //memory, redis, stash-redis, stash-memory
+                "LOG_LEVEL": "trace",
+                "MUTATE_DISABLED": "false",
+                "LOGIC_CACHE_ENABLED": "false",
+                "CACHE_PRUNE_INTERVAL": "10",
+                "CACHE_SET_READ_TTL": "10",
+                "CACHE_ENABLE_IN_PROGRESS": "true",
+                "CACHE_RETRY_INTERVAL": "1",
+                "CACHE_MAX_RETRIES": "2",
+                "CACHE_RETRY_EXP_BACKOFF": "true",
+                "CACHE_NOT_FOUND_PRUNE_INTERVAL": "10",
+                "CACHE_NOT_FOUND_TTL": "5",
+                "CACHE_NOT_FOUND_ENABLED": "false",
             }
         },
         {
-            "name": "client",
+            "name": "scenario",
             "type": "go",
             "request": "launch",
             "mode": "debug",
-            "program": "${workspaceFolder}/cmd/client/main.go",
+            "program": "${workspaceFolder}/cmd/scenario/main.go",
             "env": {
                 "CLIENT_ADDRESS": "localhost",
                 "CLIENT_PORT": "8080",
                 "CLIENT_PROTOCOL": "http",
-                "CLIENT_TIMEOUT": "10",
+                "CLIENT_TIMEOUT": "1",
                 "CACHE_DISABLED": "true",
                 "SSL_CA_FILE": "",
                 "SSL_KEY_FILE": "./certs/ssl.key",
@@ -64,8 +78,15 @@
                 "STASH_DEBUG": "true",
                 "STASH_DEBUG_PREFIX": "service",
                 "STASH_EVICTION_RATE": "60",
-                "COMMAND": "employee_read",
-                "EMP_NO": "10001",
+                "CACHE_TYPE": "", //memory, redis, stash-redis, stash-memory
+                "LOG_LEVEL": "trace",
+                "CACHE_PRUNE_INTERVAL": "10",
+                "N_CLIENTS": "1",
+                "SCENARIO": "sleep_retry", //stampeding_herd, cache_not_found, sleep_retry
+                "SCENARIO_READ_INTERVAL": "1",
+                "SCENARIO_DURATION": "10",
+                "SCENARIO_SLEEP_DURATION": "1",
+                "SCENARIO_SLEEP_ID": "",
             }
         }
     ]

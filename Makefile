@@ -20,14 +20,14 @@ help: ## - Show this help.
 	@sed -ne '/@sed/!s/## //p' $(MAKEFILE_LIST)
 
 check-lint: ## validate/install golangci-lint installation
-	@which golangci-lint || (go install github.com/golangci/golangci-lint/cmd/golangci-lint@${golint_version})
+	@which golangci-lint > /dev/null 2>&1 || (go install github.com/golangci/golangci-lint/cmd/golangci-lint@${golint_version})
 
 lint: check-lint ## lint the source with verbose output
 	@golangci-lint run --verbose
 
 # Reference: https://medium.com/@pedram.esmaeeli/generate-swagger-specification-from-go-source-code-648615f7b9d9
 check-swagger: ## - validate/install swagger (v0.29.0)
-	@which swagger || (go install github.com/go-swagger/go-swagger/cmd/swagger@${swagger_version})
+	@which swagger > /dev/null 2>&1 || (go install github.com/go-swagger/go-swagger/cmd/swagger@${swagger_version})
 
 swagger: check-swagger ## - generate the swagger.json
 	@swagger generate spec --work-dir=./internal/swagger --output ./tmp/swagger.json --scan-models
@@ -39,22 +39,25 @@ serve-swagger: swagger ## - serve (web) the swagger.json
 	@swagger serve -F=swagger ./tmp/swagger.json -p ${swagger_port} --no-open
 
 build: ## build the test image
-	@docker ${docker_args} compose --profile application build
+	@docker ${docker_args} compose --profile service --profile scenario build
 
 dep: ## run all dependencies
 	@docker ${docker_args} compose up --detach --wait
 
 run: ## run all dependencies
-	@docker ${docker_args} compose --profile application up --detach --wait
+	@docker ${docker_args} compose --profile service up --detach --wait
+
+scenario: run ## run all dependencies
+	@docker ${docker_args} compose --profile service --profile scenario up --detach --wait
 
 test: run
 	@go test ./internal/... -cover -count=1 -v
 
 stop: ## stop all dependencies and services
-	@docker ${docker_args} compose --profile application down
+	@docker ${docker_args} compose --profile service --profile scenario down
 
 clean: ## stop all dependencies and services and clear volumes
-	@docker ${docker_args} compose --profile application down --volumes --remove-orphans
+	@docker ${docker_args} compose --profile service --profile scenario down --volumes --remove-orphans
 
 mysql-employees:
 	@docker exec -it mysql sh /docker-entrypoint-initdb.d/001_load_employees.sh
