@@ -24,4 +24,7 @@ type EmployeePutResponseOk struct {
 type EmployeePutParams struct {
 	// in:body
 	EmployeePartial data.EmployeePartial `json:"employee_partial"`
+
+	// in:header
+	CorrelationId string `json:"Correlation-Id"`
 }

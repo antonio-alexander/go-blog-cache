@@ -21,4 +21,7 @@ type EmployeeDeleteResponseOk struct {
 type EmployeeDeleteParams struct {
 	// in:path
 	EmpNo string `json:"emp_no"`
+
+	// in:header
+	CorrelationId string `json:"Correlation-Id"`
 }

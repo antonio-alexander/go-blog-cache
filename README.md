@@ -17,6 +17,8 @@ Here are some links that should be helpful and got me a lot of answers in this p
 - [https://medium.com/@cocm1324/implementing-cache-with-go-71e29fcdaf7](https://medium.com/@cocm1324/implementing-cache-with-go-71e29fcdaf7): this is good for showing how to implement a cache in Go (basics) and does a good job of describing cache eviction strategies
 - [https://github.com/antonio-alexander/go-stash](https://github.com/antonio-alexander/go-stash): this is an example of a general purpose (possibly over-engineered) caching solution
 - [http://github.com/antonio-alexander/sql-blog-indexing](http://github.com/antonio-alexander/sql-blog-indexing): further down, I mention that sometimes you can get the benefits of "redis" by optimizing your database and/or queries; this blog post goes through that effort and shows some practical examples/applications
+- [https://www.geeksforgeeks.org/computer-organization-architecture/types-of-cache-misses/](https://www.geeksforgeeks.org/computer-organization-architecture/types-of-cache-misses/): this describes some kinds of cache misses
+- [https://redis.io/glossary/cache-miss/](https://redis.io/glossary/cache-miss/): this gives some background information for a cache miss in the context of Redis
 
 ## Getting Started
 
@@ -98,7 +100,7 @@ Caches are personal, they are like artwork; you could compare developing a cache
 
 - sometimes it’s better to optimize the database than to implement a cache
 
-> I can't stress this enough; caching should be implemented in sitautions where you've determined that you can't further optimize something; if you're worried about implementing a cache but having optimized (or created) indexes for tables in the database to see if you can increase performance than you've failed in due diligence
+> I can't stress this enough; caching should be implemented in situations where you've determined that you can't further optimize something; if you're worried about implementing a cache but having optimized (or created) indexes for tables in the database to see if you can increase performance than you've failed in due diligence
 
 - don't develop a cache without validation
 
@@ -290,7 +292,7 @@ How often does the data change (this is more attached to phenomena), rather than
 
 > In this case, the data changing is 100% event driven; something "else" causes this data to change, such as a life event or getting a raise and in those cases, those events don't happen often; they're periodic; in some cases, they may even adhere to a schedule (i.e., the company always gives raises at the same time every year)
 
-Is it possible to stabalize the resources of the cache?
+Is it possible to stabilize the resources of the cache?
 
 > In this case, I think the answer would be yes, because the distribution of necessary caching of employees should be relatively narrow given the infrequent nature of changes, the only time where caching would be unstable would be the one time a year everyone's salary is updated (in this case, because every user is being modified, the cache should be incredibly unstable)
 
@@ -368,7 +370,7 @@ How often does the data change (this is more attached to phenomena), rather than
 
 Is it possible to stabilize the resources of the cache?
 
-> This 100% depends on how much data you cache; the answer isn't necessarily yes or no, but can you maintain functionality of the cache while stablizing the resources is the real answer. If you have to invalidate the cache too often to stabilize it you may not be able to serve cached results often enough for it to be functional
+> This 100% depends on how much data you cache; the answer isn't necessarily yes or no, but can you maintain functionality of the cache while stabilizing the resources is the real answer. If you have to invalidate the cache too often to stabilize it you may not be able to serve cached results often enough for it to be functional
 
 What is the life cycle of the data being cached?
 
@@ -382,7 +384,7 @@ Timeseries data generally has a composite key where you have a unique identifier
 
 - current: these values have to do with "now", current values update at the rate the phenomena updates/mutates; it's possible for there to be "no" current value
 - last known: these values have to do with the _last_ time the phenomena was updated/mutated; it's only possible for there to be "no" last known value when no value has ever been generated
-- historical: these values have to do with values that have been recorded (from any time before to "now"); historical time is highly variable as your at the mercy of what the user requires. In addition, this is difficult to cache without being informed by certain business logic (e.g., there's an algorithm that uses the last known days of historical data or something like that)
+- historical: these values have to do with values that have been recorded (from any time before to "now"); historical time is highly variable as you’re at the mercy of what the user requires. In addition, this is difficult to cache without being informed by certain business logic (e.g., there's an algorithm that uses the last known days of historical data or something like that)
 
 Use of time as a key can be complicated; there are a couple of gotchas related to the formatting of the timestamp itself, the resolution of the time itself and a required logic around comparison of time (e.g., is 1:10 greater than 1:10:01). While simple in practice, keys generally being limited to strings makes this even more complicated in that to "search" for historical data in the cache you must pull a subset of the data in order to determine if what you're searching for is present in the cache.
 
@@ -398,6 +400,254 @@ In addition, concurrency adds another layer of complexity, especially for curren
 
 Like any cache, there's a technological and practical limit to how much data you can (or want) to store in a cache. Because this is timeseries data rather than scalar object data you're more likely to push the size limits. This is compounded by the nature of the data itself, 1Hz data vs 10Hz data is an order of magnitude difference in storage space. Additionally, most timeseries API almost always allows you to get data from more than one tag, so the cache must be able to aggregate data from multiple tags for the same time range.
 
+## How to Solve Problems Created (or Exacerbated) By a Cache
+
+Caches are generally meant to solve the loading it places on the store of record; reading from redis (or memory) is generally faster than reading from the database and (within reason) scales better and/or is less expensive (either in complexity or actual cost). Unfortunately, implementing a cache creates its own class of problems that may invalidate the performance benefit you're trying to get. Like most applications, problems occur during failure/failover and on certain edge cases around min/max modes (e.g., unexpected cache misses).
+
+<!-- TODO: add picture showing the period of attempting to read from the cache, maybe? -->
+
+### Stampeding Herd
+
+It's easy to forget that at some point, your cache will be empty and un-initialized; that it won't contain any data that would be used by its consumers (e.g. a cache hit). By design, when a cache miss occurs, data must be read from the store of record, in the event you have a high ratio of cache misses to cache hits, you _could_ overload the store of record or at least subject it to the load you're trying to prevent. When a cache is un-initialized, it will always result in a cache miss where upon your logic for loading the cache should initialize the cache.
+
+> Yes, you could pre-initialize the cache, but this assumes that you know what to initialize it with; keeping in the spirit of only putting data in the cache that someone is interested in, it may not be reasonable to guess or copy the entire store of record into your cache
+
+This situation where the cache is empty can be exacerbated if you have a lot of concurrent consumers asking for data that can't be in the cache. Eventually, the cache will be initialized and emit a cache hit, but in the short term, all of those concurrent calls will failover to the store of record. This can happen when the store is empty, but also if an object (or group of objects) have been invalidated in the cache.
+
+Let's say, that you have 10 concurrent consumers reading the same data and you only load data in the cache that has been read (this makes this situation a bit more practical). In order to get data into the cache, you have to have a cache miss, then successfully read the data from the store of record and THEN store it in the cache. If those 10 concurrent consumers attempting to read the same data, all experience a cache miss, then they will failover to the store of record and then update the cache (possibly with the exact same data). This wastes CPU/memory and can create a cpu/memory spike both for the cache (read/write cycle) AND for the database.
+
+This is called a cache stampede or thundering herd problem. One way to solve this problem is to introduce a delay/retry into the cache read; maybe you should read (miss) and then try again after waiting for a period of time. This works, but introduces a mandatory delay (i.e., it doesn't fail fast). And this will occur __every__ time there's a cache miss which isn't ideal: you sacrifice user experience to protect the store of record.
+
+> This isn't to say that the database or store of record is somehow so fragile that it can't survive this situation, just that this is something you can reasonably mitigate.
+
+A better solution is to serialize those initial writes with logic (like one-shot mode on a [555 timer](https://en.wikipedia.org/wiki/555_timer_IC)); for the first consumer that encounters the cache miss, you atomically set a flag that the missed value is being read and then when other consumers encounter the miss, they see that it's being read, so they delay and retry a set number of times (before failing over to the store of record). Although complex, this introduces latency only in the situation where you have a cache miss and another consumer is already attempting to load the cache.
+
+This can be implemented at scale using the cache itself and will introduce initial latency when a cache miss occurs; if there's no heavy concurrent usage, there's no latency, but if there is, then latency is introduced; this is tactical and under most situations, won't hurt the user experience.
+
+This is something that _definitely_ matters at scale, but could also occur in situations where there's heavy mutation of data that multiple consumers are interested in (or some faulty search that creates the same _key_). This problem can be demoed using the [scenario](./cmd/scenario/main.go) application along with the [service](./cmd/service/main.go) with the following configuration:
+
+```env
+LOGIC_CACHE_ENABLED=true
+CACHE_PRUNE_INTERVAL=10
+CACHE_SET_READ_TTL=10
+CACHE_ENABLE_IN_PROGRESS=true
+CACHE_RETRY_INTERVAL=1
+CACHE_MAX_RETRIES=2
+CACHE_RETRY_EXP_BACKOFF=true
+CACHE_NOT_FOUND_PRUNE_INTERVAL=10
+CACHE_NOT_FOUND_TTL=5
+CACHE_NOT_FOUND_ENABLED=false
+```
+
+When running the _stampeding_herd_ scenario, the service will show the following logs:
+
+```sh
+2026/03/07 02:05:07 [trace] (scenario_stampeding_herd) executed employee_create: 500000
+2026/03/07 02:05:07 [trace] (scenario_stampeding_herd) executed cache_clear
+2026/03/07 02:05:07 [trace] (scenario_stampeding_herd) executed cache_counters_clear
+2026/03/07 02:05:08 [trace] (scenario_stampeding_herd_4) cache miss (retry) for employee (500000): employee not cached, read set
+2026/03/07 02:05:08 [trace] (scenario_stampeding_herd_3) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:08 [trace] (scenario_stampeding_herd_2) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:08 [trace] (scenario_stampeding_herd_1) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_3) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_3) cache miss (not found) for employee (500000)
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_2) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_1) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_2) cache miss (not found) for employee (500000)
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_1) cache miss (not found) for employee (500000)
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_4) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_4) cache miss (not found) for employee (500000)
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_3) executed employee_read: 500000
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_3) cache hit employee (500000) read cache hit
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_3) executed employee_read: 500000
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd) cache invalidated: 500000
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd) executed employee_update: 500000
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_2) executed employee_read: 500000
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_4) executed employee_read: 500000
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_2) cache hit employee (500000) read cache hit
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_2) executed employee_read: 500000
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_4) cache hit employee (500000) read cache hit
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_4) executed employee_read: 500000
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_1) executed employee_read: 500000
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_1) cache hit employee (500000) read cache hit
+2026/03/07 02:05:09 [trace] (scenario_stampeding_herd_1) executed employee_read: 500000
+2026/03/07 02:05:10 [trace] (scenario_stampeding_herd_4) cache hit employee (500000) read cache hit
+2026/03/07 02:05:10 [trace] (scenario_stampeding_herd_4) executed employee_read: 500000
+2026/03/07 02:05:10 [trace] (scenario_stampeding_herd_2) cache hit employee (500000) read cache hit
+2026/03/07 02:05:10 [trace] (scenario_stampeding_herd_3) cache hit employee (500000) read cache hit
+2026/03/07 02:05:10 [trace] (scenario_stampeding_herd_2) executed employee_read: 500000
+2026/03/07 02:05:10 [trace] (scenario_stampeding_herd_1) cache hit employee (500000) read cache hit
+2026/03/07 02:05:10 [trace] (scenario_stampeding_herd_1) executed employee_read: 500000
+2026/03/07 02:05:10 [trace] (scenario_stampeding_herd_3) executed employee_read: 500000
+2026/03/07 02:05:11 [trace] (scenario_stampeding_herd_1) cache hit employee (500000) read cache hit
+2026/03/07 02:05:11 [trace] (scenario_stampeding_herd_2) cache hit employee (500000) read cache hit
+2026/03/07 02:05:11 [trace] (scenario_stampeding_herd_2) executed employee_read: 500000
+2026/03/07 02:05:11 [trace] (scenario_stampeding_herd_1) executed employee_read: 500000
+2026/03/07 02:05:11 [trace] (scenario_stampeding_herd_4) cache hit employee (500000) read cache hit
+2026/03/07 02:05:11 [trace] (scenario_stampeding_herd_3) cache hit employee (500000) read cache hit
+2026/03/07 02:05:11 [trace] (scenario_stampeding_herd_3) executed employee_read: 500000
+2026/03/07 02:05:11 [trace] (scenario_stampeding_herd_4) executed employee_read: 500000
+2026/03/07 02:05:11 [trace] (scenario_stampeding_herd) cache invalidated: 500000
+2026/03/07 02:05:11 [trace] (scenario_stampeding_herd) executed employee_update: 500000
+2026/03/07 02:05:12 [trace] (scenario_stampeding_herd_3) cache miss (retry) for employee (500000): employee not cached, read set
+2026/03/07 02:05:12 [trace] (scenario_stampeding_herd_1) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:12 [trace] (scenario_stampeding_herd_4) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:12 [trace] (scenario_stampeding_herd_2) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_3) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_3) cache miss (not found) for employee (500000)
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_2) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_4) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_2) cache miss (not found) for employee (500000)
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_4) cache miss (not found) for employee (500000)
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_1) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_1) cache miss (not found) for employee (500000)
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_3) executed employee_read: 500000
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_3) cache hit employee (500000) read cache hit
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_3) executed employee_read: 500000
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd) cache invalidated: 500000
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd) executed employee_update: 500000
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_2) executed employee_read: 500000
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_1) executed employee_read: 500000
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_2) cache hit employee (500000) read cache hit
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_2) executed employee_read: 500000
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_4) executed employee_read: 500000
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_1) cache hit employee (500000) read cache hit
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_1) executed employee_read: 500000
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_4) cache hit employee (500000) read cache hit
+2026/03/07 02:05:13 [trace] (scenario_stampeding_herd_4) executed employee_read: 500000
+2026/03/07 02:05:14 [trace] (scenario_stampeding_herd_3) cache hit employee (500000) read cache hit
+2026/03/07 02:05:14 [trace] (scenario_stampeding_herd_2) cache hit employee (500000) read cache hit
+2026/03/07 02:05:14 [trace] (scenario_stampeding_herd_4) cache hit employee (500000) read cache hit
+2026/03/07 02:05:14 [trace] (scenario_stampeding_herd_2) executed employee_read: 500000
+2026/03/07 02:05:14 [trace] (scenario_stampeding_herd_1) cache hit employee (500000) read cache hit
+2026/03/07 02:05:14 [trace] (scenario_stampeding_herd_4) executed employee_read: 500000
+2026/03/07 02:05:14 [trace] (scenario_stampeding_herd_1) executed employee_read: 500000
+2026/03/07 02:05:14 [trace] (scenario_stampeding_herd_3) executed employee_read: 500000
+2026/03/07 02:05:15 [trace] (scenario_stampeding_herd_4) cache hit employee (500000) read cache hit
+2026/03/07 02:05:15 [trace] (scenario_stampeding_herd_3) cache hit employee (500000) read cache hit
+2026/03/07 02:05:15 [trace] (scenario_stampeding_herd_4) executed employee_read: 500000
+2026/03/07 02:05:15 [trace] (scenario_stampeding_herd_3) executed employee_read: 500000
+2026/03/07 02:05:15 [trace] (scenario_stampeding_herd_1) cache hit employee (500000) read cache hit
+2026/03/07 02:05:15 [trace] (scenario_stampeding_herd_1) executed employee_read: 500000
+2026/03/07 02:05:15 [trace] (scenario_stampeding_herd_2) cache hit employee (500000) read cache hit
+2026/03/07 02:05:15 [trace] (scenario_stampeding_herd_2) executed employee_read: 500000
+2026/03/07 02:05:15 [trace] (scenario_stampeding_herd) cache invalidated: 500000
+2026/03/07 02:05:15 [trace] (scenario_stampeding_herd) executed employee_update: 500000
+2026/03/07 02:05:16 [trace] (scenario_stampeding_herd_4) cache miss (retry) for employee (500000): employee not cached, read set
+2026/03/07 02:05:16 [trace] (scenario_stampeding_herd_3) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:16 [trace] (scenario_stampeding_herd_1) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:16 [trace] (scenario_stampeding_herd_2) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_1) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_1) cache miss (not found) for employee (500000)
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_2) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_2) cache miss (not found) for employee (500000)
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_3) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_3) cache miss (not found) for employee (500000)
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_4) cache miss (retry) for employee (500000): employee not cached, read already set
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_4) cache miss (not found) for employee (500000)
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_1) executed employee_read: 500000
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_1) cache hit employee (500000) read cache hit
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_1) executed employee_read: 500000
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_2) executed employee_read: 500000
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_2) cache hit employee (500000) read cache hit
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_2) executed employee_read: 500000
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_3) executed employee_read: 500000
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_3) cache hit employee (500000) read cache hit
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_3) executed employee_read: 500000
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_4) executed employee_read: 500000
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_4) cache hit employee (500000) read cache hit
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd_4) executed employee_read: 500000
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd) cache invalidated: 500000
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd) executed employee_update: 500000
+2026/03/07 02:05:17 [trace] (scenario_stampeding_herd) executed employee_delete: 500000
+```
+
+> In this logic, you can see the stampeding herd problem presented each time the employee is mutated, evicted from the cache and then as the different clients attempt to read the cache; the first client to attempt to read will "set" the read, while subsequent clients see that the read has already been set and they then retry until successful. From the client's perspective, these calls may take slightly longer (depending on the number of retries), but the database is only hit once to service each request, the remainder of the load is placed on the cache
+
+See the output of the scenario application:
+
+```sh
+2026/03/07 02:05:07 [info] scenarios: go-blog-cache v<no_version_provided> (<no_git_commit>) built from: <no_git_branch>
+2026/03/07 02:05:07 [info] client: cache disabled
+2026/03/07 02:05:07 [info] client: cache disabled
+2026/03/07 02:05:07 [info] client: cache disabled
+2026/03/07 02:05:07 [info] client: cache disabled
+2026/03/07 02:05:07 [info] client: cache disabled
+2026/03/07 02:05:07 [info] executing stampeding_herd scenario
+2026/03/07 02:05:07 [info] (scenario_stampeding_herd) created employee: 500000
+2026/03/07 02:05:09 [info] (scenario_stampeding_herd_3) successfully read employee (500000)
+2026/03/07 02:05:09 [info] (scenario_stampeding_herd_3) successfully read employee (500000)
+2026/03/07 02:05:09 [info] (scenario_stampeding_herd_2) successfully read employee (500000)
+2026/03/07 02:05:09 [info] (scenario_stampeding_herd_4) successfully read employee (500000)
+2026/03/07 02:05:09 [info] (scenario_stampeding_herd_2) successfully read employee (500000)
+2026/03/07 02:05:09 [info] (scenario_stampeding_herd_4) successfully read employee (500000)
+2026/03/07 02:05:09 [info] (scenario_stampeding_herd_1) successfully read employee (500000)
+2026/03/07 02:05:09 [info] (scenario_stampeding_herd_1) successfully read employee (500000)
+2026/03/07 02:05:10 [info] (scenario_stampeding_herd_3) successfully read employee (500000)
+2026/03/07 02:05:10 [info] (scenario_stampeding_herd_4) successfully read employee (500000)
+2026/03/07 02:05:10 [info] (scenario_stampeding_herd_1) successfully read employee (500000)
+2026/03/07 02:05:10 [info] (scenario_stampeding_herd_2) successfully read employee (500000)
+2026/03/07 02:05:11 [info] (scenario_stampeding_herd_2) successfully read employee (500000)
+2026/03/07 02:05:11 [info] (scenario_stampeding_herd_1) successfully read employee (500000)
+2026/03/07 02:05:11 [info] (scenario_stampeding_herd_3) successfully read employee (500000)
+2026/03/07 02:05:11 [info] (scenario_stampeding_herd_4) successfully read employee (500000)
+2026/03/07 02:05:13 [info] (scenario_stampeding_herd_3) successfully read employee (500000)
+2026/03/07 02:05:13 [info] (scenario_stampeding_herd_3) successfully read employee (500000)
+2026/03/07 02:05:13 [info] (scenario_stampeding_herd_2) successfully read employee (500000)
+2026/03/07 02:05:13 [info] (scenario_stampeding_herd_1) successfully read employee (500000)
+2026/03/07 02:05:13 [info] (scenario_stampeding_herd_4) successfully read employee (500000)
+2026/03/07 02:05:13 [info] (scenario_stampeding_herd_2) successfully read employee (500000)
+2026/03/07 02:05:13 [info] (scenario_stampeding_herd_1) successfully read employee (500000)
+2026/03/07 02:05:13 [info] (scenario_stampeding_herd_4) successfully read employee (500000)
+2026/03/07 02:05:14 [info] (scenario_stampeding_herd_2) successfully read employee (500000)
+2026/03/07 02:05:14 [info] (scenario_stampeding_herd_1) successfully read employee (500000)
+2026/03/07 02:05:14 [info] (scenario_stampeding_herd_4) successfully read employee (500000)
+2026/03/07 02:05:14 [info] (scenario_stampeding_herd_3) successfully read employee (500000)
+2026/03/07 02:05:15 [info] (scenario_stampeding_herd_3) successfully read employee (500000)
+2026/03/07 02:05:15 [info] (scenario_stampeding_herd_1) successfully read employee (500000)
+2026/03/07 02:05:15 [info] (scenario_stampeding_herd_4) successfully read employee (500000)
+2026/03/07 02:05:15 [info] (scenario_stampeding_herd_2) successfully read employee (500000)
+2026/03/07 02:05:17 [info] (scenario_stampeding_herd_1) successfully read employee (500000)
+2026/03/07 02:05:17 [info] (scenario_stampeding_herd_1) successfully read employee (500000)
+2026/03/07 02:05:17 [info] (scenario_stampeding_herd_2) successfully read employee (500000)
+2026/03/07 02:05:17 [info] (scenario_stampeding_herd_2) successfully read employee (500000)
+2026/03/07 02:05:17 [info] (scenario_stampeding_herd_3) successfully read employee (500000)
+2026/03/07 02:05:17 [info] (scenario_stampeding_herd_3) successfully read employee (500000)
+2026/03/07 02:05:17 [info] (scenario_stampeding_herd_4) successfully read employee (500000)
+2026/03/07 02:05:17 [info] (scenario_stampeding_herd_4) successfully read employee (500000)
+2026/03/07 02:05:17 [info] (scenario_stampeding_herd) cache hit miss ratio (28/64): 43.75%
+2026/03/07 02:05:17 [info] (scenario_stampeding_herd) deleted employee: 500000
+```
+
+> In this case, even though the retries are considered misses, subjectively; they aren't experienced by the client and thus all the client sees are successful reads
+
+### Caching the Absence of Data
+
+Another problem is the cache handling the concept of zero or 'no data'. Using the failover logic, if the data doesn't exist, you'll always get a cache miss: you'll hit the database and it won't be in the record of store. So (by design) for data that doesn't exist, you'll always follow the data path that puts load on the record of store. So in situations where that miss is practical and expected; you can cache that "miss" such that the cache returns a response that you can communicate and avoid hitting the store of record.
+
+For example, let’s say I want to search for employees with the first name 'Frank', but no employees exist with that name. If I continue to perform that search, it'll always result in a miss such that I’ll check the cache and the store: it'll completely bypass my caching logic. If this is something that happens often enough, you can resolve it, by caching this miss and returning it as a hit. It _still_ needs to be invalidated, possibly timer-based, but this way the cache can stabilize and you're not polling the store for something that doesn't exist (yet).
+
+This problem can be demoed using the [scenario](./cmd/scenario/main.go) application along with the [service](./cmd/service/main.go) with the following configuration:
+
+```env
+LOGIC_CACHE_ENABLED=true
+CACHE_PRUNE_INTERVAL=10
+CACHE_SET_READ_TTL=10
+CACHE_ENABLE_IN_PROGRESS=true
+CACHE_RETRY_INTERVAL=1
+CACHE_MAX_RETRIES=2
+CACHE_RETRY_EXP_BACKOFF=true
+CACHE_NOT_FOUND_PRUNE_INTERVAL=10
+CACHE_NOT_FOUND_TTL=5
+CACHE_NOT_FOUND_ENABLED=true
+```
+
+<!-- TODO: cache miss by there being no data or concept of zero, talk about how it's difficult to represent "no data"; talk about situations where data is deleted and doesn't exist to place in the cache, so will always cause a database hit; talk about how to cache that a search (specifically) can result in empty data-->
+
+### Hybrid Memory Cache
+
+<!-- TODO: talk about how you can de-couple certain operations from the cache source to reduce or normalize the load on the cache (with an emphasis on redis) -->
+
 ## Frequently Asked Questions
 
 What are the advantages of placing a cache server-side? client-side? intermediary?
@@ -410,7 +660,7 @@ Is it likely that where you place the cache, similar data will be read?
 
 Are in-memory caches not a practical solution?
 
-> These are practical; I think localized in-memory caches can be tactically placed in specific locations. In-memory caches are the same as client-side caching; they are the "most personal" in that you can cache information that specific to the client. Client-side implementation of in-memory caches can have an incredibly high-level of efficacy since you can eliminate the RTT associated with poor performance. This is not unlike lazy loading
+> These are practical; I think localized in-memory caches can be tactically placed in specific locations. In-memory caches are the same as client-side caching; they are the "most personal" in that you can cache information that specific to the client. Client-side implementation of in-memory caches can have an incredibly high-level of efficacy since you can eliminate the RTT associated with poor performance. This is not unlike lazy loading; just keep in mind that these caches can't communicate across application boundaries; so care must be taken when scaling horizontally
 
 What happens when you add specific (non-cache) business logic to a cache?
 
@@ -442,11 +692,11 @@ How can you confirm data consistency around more complicated read functions like
 
 How should you handle cache errors?
 
-> Errors in the cache should never be passed to the client but should be visible and exposed to logging for debug purposes. Because caching occurs at a "hidden" layer it’s important to have _some_ ability to debug it and/or know what's going on. For example, even if your cache logic automatically failover to the source of truth, if the experience just gets slow and it's not obvious the cache is failing (or getting more misses than expected); it’s MUCH harder to troubleshoot
+> Errors in the cache should never be passed to the client but should be visible and exposed to logging for debug purposes (preferably trace logs). Because caching occurs at a "hidden" layer it’s important to have _some_ ability to debug it and/or know what's going on. For example, even if your cache logic will automatically failover to the source of truth, if the experience just gets slow and it's not obvious the cache is failing (or getting more misses than expected); it’s MUCH harder to troubleshoot
 
 How can scaling from the perspective of clients and services affect the design of a cache?
 
-> Multiple clients, especially multiple clients asking for data that has yet to be synced, can tax a cache significantly or invalidate an assumption. Although I do go over this elsewhere, you may think of the eviction and subsequent setting of the cache to be a serial or concurrent operation, but it's parallel, there's no guarantee that multiple clients won't attempt to get data that's not in the cache at the same time. Additionally, when you have a load balanacer or multiple instances of a given service, a memory cache is no longer effective (as each instance would have a different version of the cache)
+> Multiple clients, especially multiple clients asking for data that has yet to be synced, can tax a cache significantly or invalidate an assumption. Although I do go over this elsewhere, you may think of the eviction and subsequent setting of the cache to be a serial or concurrent operation, but it's parallel, there's no guarantee that multiple clients won't attempt to get data that's not in the cache at the same time. Additionally, when you have a load balancer or multiple instances of a given service, a memory cache is no longer effective (as each instance would have a different version of the cache)
 
 How can load balancers, multiple instances of a service (or cache) affect the design of a cache?
 
@@ -462,16 +712,16 @@ Is interacting with a cache fundamentally the same as interacting with a databas
 
 What if it takes the same amount of time to read from a cache than to read from a database?
 
-> This is a possibility. Practically it means that you probably won't get enough benefit from the cache to go through the trouble of implementing it. For a cache to be useful, at a minimum, it must be faster to read from it than the source of truth. You could argue that it might scale better (e.g., scale cheaper); but you'd have to validate this
+> This is a possibility. Practically it means that you probably won't get enough benefit from the cache to go through the trouble of implementing it. For a cache to be useful, at a minimum, it should be faster to read from it than the source of truth. You could argue that it might scale better (e.g., scale cheaper); but you'd have to validate this
 
 Can a cache help me optimize for concurrency (not just performance)?
 
-> Kind of; I think the context of this question is that optimizing for performance is one thing, but if you have a high level of concurrency (think thousands of simultaneous users); even if you have subperb performance, the limitation becomes how many users you can serve simultaneously without a reduction in [perceived] performance. Databases in terms of concurrency, scale with the numnber of connections which is _fixed_; there is some magic
+> Kind of; I think the context of this question is that optimizing for performance is one thing, but if you have a high level of concurrency (think thousands of simultaneous users); even if you have superb performance, the limitation becomes how many users you can serve simultaneously without a reduction in [perceived] performance. Databases in terms of concurrency, scale with the number of connections which is _fixed_; there is some magic
 you can do with tools like [pgbouncer](https://www.pgbouncer.org/) and you can also scale the number of replicas (I want to say this is a bit more complicated for mutations). A cache may scale differently in terms of concurrency and may use those connections for a shorter period of time so ther'es a possibility that caches (like redis) can scale cheaper and with less complexity than a database
 
 Shouldn't we just cache objects as we mutate them?
 
-> No, although its safe to assume that there may be an implicit read-back when you mutate an object, this read-back doesn't benefit from a cached value AND there's no guarantee that it'll be read again. Additionally, its possible that it's mutated again before it's cached and as a result, there would be no benefit to storing that version of the object in the cache. Its always best to populate the cache with things that are actively being read
+> You can. Although it’s safe to assume that there is probably an implicit read-back when you mutate an object, this read-back doesn't benefit from a cached value AND there's no guarantee that it'll be read again. It’s possible that it's mutated once more before it's read and as a result, there would be no benefit to storing that version of the object in the cache. It's my opinion that it's best to populate the cache with things that are actively being read
 
 Is there a way we can totally prevent the cache from being wrong between the time between mutating an object in the db and removing it from the cache?
 
@@ -480,3 +730,31 @@ Is there a way we can totally prevent the cache from being wrong between the tim
 Since the client and server could share the same redis instance, wouldn't it be more efficient to have the client use the cache directly?
 
 > Yes, totally possible, but not without drawbacks. Elsewhere in this document, I've mentioned things about cache placement. Although it effectively reduces the number of hops to 1 and if data is in the cache it could _potentially_ have the best performance it comes with a handful of drawbacks: (1) shared cache on the client would mean that the cache would hold significantly more data that is less localized, (2) it's more likely for the cache to be incorrect since you could read faster and (3) you have to expose your redis instance to clients and this could increase the attack surface area
+
+How do you cache data that doesn't exist?
+
+> This certainly has some context, but if your cache logic doesn't recognize the concept of zero or 'not present', you can have some issues with cache normalization. If the data doesn't exist in the cache, it may "always" result in a cache miss and cause an unnecessary database hit (undoing the reduction in load you implemented the cache first)
+
+Is there a way to mitigate the stampeding herd problem without the complexity (and footprint) of complex one-shot logic?
+
+> Yes, but you lose some of the core functionality of the cache. If you pre-emptively refresh the data in the cache as opposed to evicting data and depending on readers to trigger refreshes,you can mitigate the stampeding herd problem as the opportunity for there to be "no data" is less likely (unless the data doesn't exist or has been deleted). This does mean that you're forced to cache ALL the data or create some alternate algorithm that can know what data to refresh
+
+How do you cache data that's secured with authz?
+
+> The short answer is that you have to be able to perform the authz in _realtime_; even if the data is stale, the authz must always be current (or as current as is reasonable). If you provide "secure" data...with an _insecure_ cache, you've created a security hole; if someone finds a way to get your code to cache the secure data, they can then read it sans authz; this provides an interesting avenue as well because deleted data which is no longer available from the source of truth may still live in your cache
+
+Should you retry server-side? Are there situations where this isn't ideal?
+
+> The general answer is no you shouldn't; you should generally build your server-side logic to fail as fast as possible; failing fast can translate to less resource usage. An exception to this is with the solution implemented for [stampeding herd](#stampeding-herd). In this case, server-side, you __know__ that a read is in progress and given enough time, the value _should_ be cached, so retrying server-side makes sense if the roundtrip time for read+cache is reasonable. In the absence of this logic, server-side retries can increase the stampeding herd problem by an order of magnitude
+
+Should you retry client-side? What situations should you be worried about?
+
+> Similar to server-side, you should do this sparingly; failing fast and letting high-level processes determine what to do next is a better habit, but if you do retry client-side, it should be driven by the server by giving a 429 and setting the RetryAfter header with some configurable (client-side) max retry attempts
+
+What part does rate limiting play when it comes to caching and retry attempts?
+
+> Rate limiting, similar to retring to a way to shape or enforce expected usage patterns; it should happen at a much higher level than the server, but it should use the same 429/Retry-After mechanism with possibly not even making it to the service (if you were using a facade pattern)
+
+Should I worry about cache related problems (e.g., stampeding herd) when it comes to client-side caches?
+
+> Maybe; there are some situations (at scale) where it makes more sense to have a common client cache (i.e., using redis) and in these cases, although there's not a source of truth (so to speak) to protect, the solutions mentioned above may reduce the load on redis. Additionally, because it's not client-side, you could also create a hybrid redis/memory cache which could have varying degrees of use server-side
