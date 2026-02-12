@@ -2,48 +2,83 @@ package service
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/antonio-alexander/go-blog-cache/internal/data"
 )
 
+func getCorrelationId(req *http.Request) string {
+	if correlationId := req.Header.Get("Correlation-Id"); correlationId != "" {
+		return correlationId
+	}
+	if correlationId := req.URL.Query().Get("correlation_id"); correlationId != "" {
+		return correlationId
+	}
+	return ""
+}
+
 func empNoFromPath(pathVariables map[string]string) (int64, error) {
 	empNo := pathVariables[data.PathEmpNo]
 	return strconv.ParseInt(empNo, 10, 64)
 }
 
-func handleResponse(writer http.ResponseWriter, err error, items ...interface{}) {
+func handleResponse(writer http.ResponseWriter, err error, items ...any) error {
+	var statusCode int
 	var bytes []byte
 
-	if err == nil {
+	if err != nil {
+		var e error
+
 		switch {
 		default:
-			bytes, err = json.Marshal(items[0])
-		case len(items) <= 0:
-			writer.WriteHeader(http.StatusNoContent)
+			bytes, e = json.Marshal(&data.Error{
+				ErrorMessage: err.Error(),
+				ErrorType:    data.ErrorTypeUnknown,
+			})
+			if e != nil {
+				return e
+			}
+			statusCode = data.ErrorTypeUnknown.StatusCode()
+		case errors.Is(err, data.ErrNotCached),
+			errors.Is(err, data.ErrNotFound),
+			errors.Is(err, data.ErrUnknown):
+			err, _ := err.(*data.Error)
+			bytes, e = json.Marshal(err)
+			if e != nil {
+				return e
+			}
+			statusCode = err.StatusCode()
+		case errors.Is(err, data.ErrNotCachedRetry):
+			err, _ := err.(*data.Error)
+			bytes, e = json.Marshal(err)
+			if e != nil {
+				return e
+			}
+			statusCode = err.StatusCode()
+			writer.Header().Set("Retry-After", "10")
 		}
-	}
-	if err != nil {
-		var e struct {
-			Error string `json:"error"`
-		}
-
-		writer.WriteHeader(http.StatusInternalServerError)
-		e.Error = err.Error()
-		bytes, err = json.Marshal(&e)
-		if err != nil {
-			fmt.Printf("error handling response: %s\n", err)
-			return
-		}
+		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+		writer.WriteHeader(statusCode)
 		if _, err := writer.Write(bytes); err != nil {
-			fmt.Printf("error handling response: %s\n", err)
+			return err
 		}
-		return
+		return nil
 	}
-	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	switch {
+	default:
+		bytes, err = json.Marshal(items[0])
+		if err != nil {
+			return err
+		}
+		statusCode = http.StatusOK
+	case len(items) <= 0:
+		statusCode = http.StatusNoContent
+	}
+	writer.WriteHeader(statusCode)
 	if _, err := writer.Write(bytes); err != nil {
-		fmt.Printf("error handling response: %s\n", err)
+		return err
 	}
+	return nil
 }

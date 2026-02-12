@@ -1,28 +1,41 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"net"
 	"net/http"
-	"net/url"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/antonio-alexander/go-blog-cache/internal"
 	"github.com/antonio-alexander/go-blog-cache/internal/cache"
 	"github.com/antonio-alexander/go-blog-cache/internal/data"
+	"github.com/antonio-alexander/go-blog-cache/internal/utilities"
 
 	"github.com/pkg/errors"
 )
 
-type Client struct {
+type Client interface {
+	EmployeeCreate(ctx context.Context,
+		employeePartial data.EmployeePartial) (*data.Employee, error)
+	EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error)
+	EmployeesSearch(ctx context.Context,
+		search data.EmployeeSearch) ([]*data.Employee, error)
+	EmployeeUpdate(ctx context.Context, empNo int64,
+		employeePartial data.EmployeePartial) (*data.Employee, error)
+	EmployeeDelete(ctx context.Context, empNo int64) error
+	CacheClear(ctx context.Context) error
+	CacheCountersRead(ctx context.Context) (*data.CacheCounters, error)
+	CacheCountersClear(ctx context.Context) error
+	TimersRead(ctx context.Context) (*data.Timers, error)
+	TimersClear(ctx context.Context) error
+}
+
+type client struct {
 	sync.RWMutex
-	*http.Client
-	cache  cache.Cache
 	config struct {
 		protocol      string
 		address       string
@@ -32,73 +45,57 @@ type Client struct {
 		sslCrtFile    string
 		sslKeyFile    string
 		cacheDisabled bool
+		maxRetries    int
 	}
-	address string
+	address   string
+	cache     cache.Cache
+	ctx       context.Context
+	ctxCancel context.CancelFunc
+	opened    bool
+	utilities.Logger
+	*http.Client
 }
 
-func NewClient(parameters ...interface{}) *Client {
-	c := &Client{Client: &http.Client{}}
+func NewClient(parameters ...any) interface {
+	internal.Configurer
+	internal.Opener
+	Client
+} {
+	c := &client{Client: &http.Client{}}
 	for _, parameter := range parameters {
 		switch p := parameter.(type) {
 		case cache.Cache:
 			c.cache = p
+		case utilities.Logger:
+			c.Logger = p
 		}
 	}
 	return c
 }
 
-func (c *Client) doRequest(ctx context.Context, uri, method string, item interface{}) ([]byte, error) {
-	var contentLength int
-	var contentType string
-	var body io.Reader
-
-	switch d := item.(type) {
-	case []byte:
-		body = bytes.NewBuffer(d)
-		contentLength = len(d)
-		contentType = "application/json"
-	case url.Values:
-		switch method {
-		default:
-			uri = uri + "?" + d.Encode()
-		case http.MethodPut, http.MethodPost, http.MethodPatch:
-			body = strings.NewReader(d.Encode())
-			contentType = "application/x-www-form-urlencoded"
-			contentLength = len(d.Encode())
+func (c *client) doRequest(ctx context.Context, method, uri string, item any) ([]byte, error) {
+	bytes, retryAfter, err := doRequest(ctx, c.Client, method, uri, item)
+	if c.config.maxRetries > 0 && retryAfter > 0 {
+		c.Trace(ctx, "initial request failed (%s+%s), attempting to retry (max: %d)",
+			method, uri, c.config.maxRetries)
+		for i := range c.config.maxRetries {
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("client context canclled while retrying: %w", context.Canceled)
+			case <-time.After(retryAfter):
+				c.Trace(ctx, "retrying (%s+%s), attempt %d of %d",
+					method, uri, i, c.config.maxRetries)
+				bytes, retryAfter, err = doRequest(ctx, c.Client, uri, method, item)
+				if retryAfter <= 0 {
+					return bytes, err
+				}
+			}
 		}
 	}
-	request, err := http.NewRequestWithContext(ctx, method, uri, body)
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Add("Content-Type", contentType)
-	request.Header.Add("Content-Length", strconv.Itoa(contentLength))
-	response, err := c.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	bytes, err := io.ReadAll(response.Body)
-	defer response.Body.Close()
-	if err != nil {
-		return nil, err
-	}
-	switch response.StatusCode {
-	default:
-		var e struct {
-			Error error `json:"error"`
-		}
-
-		if e := json.Unmarshal(bytes, &err); e != nil {
-			return nil, errors.Errorf("status code: %d; %s",
-				response.StatusCode, string(bytes))
-		}
-		return nil, errors.New(e.Error.Error())
-	case http.StatusOK, http.StatusNoContent:
-		return bytes, nil
-	}
+	return bytes, err
 }
 
-func (c *Client) Configure(envs map[string]string) error {
+func (c *client) Configure(envs map[string]string) error {
 	if address, ok := envs["CLIENT_ADDRESS"]; ok {
 		c.config.address = address
 	}
@@ -127,29 +124,28 @@ func (c *Client) Configure(envs map[string]string) error {
 	if cacheDisabled, ok := envs["CACHE_DISABLED"]; ok {
 		c.config.cacheDisabled, _ = strconv.ParseBool(cacheDisabled)
 	}
+	if maxRetries, ok := envs["CLIENT_MAX_RETRIES"]; ok {
+		c.config.maxRetries, _ = strconv.Atoi(maxRetries)
+	}
 	return nil
 }
 
-func (c *Client) Open() error {
+func (c *client) Open(ctx context.Context) error {
 	c.Lock()
 	defer c.Unlock()
 
-	c.address = strings.TrimPrefix(c.config.address, "https://")
-	c.address = strings.TrimPrefix(c.config.address, "http://")
-	if c.config.port != "" {
-		c.address += ":" + c.config.port
+	if c.opened {
+		return nil
 	}
 	switch c.config.protocol {
 	default:
 		return errors.Errorf("unsupported protocol: %s", c.config.protocol)
 	case "http", "https":
-		c.address = fmt.Sprintf("%s://%s", c.config.protocol, c.config.address)
-		if c.config.port != "" {
-			c.address += fmt.Sprintf(":%s", c.config.port)
-		}
+		c.address = fmt.Sprintf("%s://%s", c.config.protocol,
+			net.JoinHostPort(c.config.address, c.config.port))
 	}
 	if c.config.cacheDisabled {
-		fmt.Println("cache disabled")
+		c.Info(ctx, "client: cache disabled")
 	}
 	c.Client.Timeout = time.Duration(c.config.timeout) * time.Second
 	tlsConfig, err := getTlsConfig(c.config.sslCaFile, c.config.sslCrtFile,
@@ -158,24 +154,31 @@ func (c *Client) Open() error {
 		return err
 	}
 	c.Client.Transport = tlsConfig
+	c.ctx, c.ctxCancel = context.WithCancel(context.Background())
+	c.opened = true
 	return nil
 }
 
-func (c *Client) Close() error {
+func (c *client) Close(ctx context.Context) error {
 	c.Lock()
 	defer c.Unlock()
 
+	if !c.opened {
+		return nil
+	}
+	c.ctxCancel()
+	c.opened = false
 	return nil
 }
 
-func (c *Client) EmployeeCreate(ctx context.Context, employeePartial data.EmployeePartial) (*data.Employee, error) {
+func (c *client) EmployeeCreate(ctx context.Context, employeePartial data.EmployeePartial) (*data.Employee, error) {
 	bytes, err := json.Marshal(&data.Request{
 		EmployeePartial: employeePartial})
 	if err != nil {
 		return nil, err
 	}
 	uri := c.address + data.RouteEmployees
-	bytes, err = c.doRequest(ctx, uri, http.MethodPut, bytes)
+	bytes, err = c.doRequest(ctx, http.MethodPut, uri, bytes)
 	if err != nil {
 		return nil, err
 	}
@@ -186,16 +189,16 @@ func (c *Client) EmployeeCreate(ctx context.Context, employeePartial data.Employ
 	return response.Employee, nil
 }
 
-func (c *Client) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error) {
+func (c *client) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error) {
 	if !c.config.cacheDisabled {
 		employee, err := c.cache.EmployeeRead(ctx, empNo)
 		if err == nil {
 			return employee, nil
 		}
-		fmt.Printf("error while reading employee (%d) from cache: %s\n", empNo, err)
+		c.Error(ctx, "error while reading employee (%d) from cache: %s\n", empNo, err)
 	}
 	uri := fmt.Sprintf(c.address+data.RouteEmployeesEmpNof, empNo)
-	bytes, err := c.doRequest(ctx, uri, http.MethodGet, nil)
+	bytes, err := c.doRequest(ctx, http.MethodGet, uri, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -205,13 +208,13 @@ func (c *Client) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee,
 	}
 	if !c.config.cacheDisabled {
 		if err := c.cache.EmployeesWrite(ctx, data.EmployeeSearch{}, response.Employee); err != nil {
-			fmt.Printf("error while writing employee (%d) to cache: %s\n", empNo, err)
+			c.Error(ctx, "error while writing employee (%d) to cache: %s\n", empNo, err)
 		}
 	}
 	return response.Employee, nil
 }
 
-func (c *Client) EmployeesSearch(ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error) {
+func (c *client) EmployeesSearch(ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error) {
 	var response data.Response
 
 	if !c.config.cacheDisabled {
@@ -219,11 +222,11 @@ func (c *Client) EmployeesSearch(ctx context.Context, search data.EmployeeSearch
 		if err == nil {
 			return employees, nil
 		}
-		fmt.Printf("error while reading employees from cache: %s\n", err)
+		c.Error(ctx, "error while reading employees from cache: %s\n", err)
 	}
 	params := search.ToParams()
 	uri := c.address + data.RouteEmployeesSearch
-	bytes, err := c.doRequest(ctx, uri, http.MethodGet, params)
+	bytes, err := c.doRequest(ctx, http.MethodGet, uri, params)
 	if err != nil {
 		return nil, err
 	}
@@ -232,19 +235,19 @@ func (c *Client) EmployeesSearch(ctx context.Context, search data.EmployeeSearch
 	}
 	if !c.config.cacheDisabled {
 		if err := c.cache.EmployeesWrite(ctx, search, response.Employees...); err != nil {
-			fmt.Printf("error while writing employees to cache: %s\n", err)
+			c.Error(ctx, "error while writing employees to cache: %s\n", err)
 		}
 	}
 	return response.Employees, nil
 }
 
-func (c *Client) EmployeeUpdate(ctx context.Context, empNo int64, employeePartial data.EmployeePartial) (*data.Employee, error) {
+func (c *client) EmployeeUpdate(ctx context.Context, empNo int64, employeePartial data.EmployeePartial) (*data.Employee, error) {
 	bytes, err := json.Marshal(&data.Request{EmployeePartial: employeePartial})
 	if err != nil {
 		return nil, err
 	}
 	uri := fmt.Sprintf(c.address+data.RouteEmployeesEmpNof, empNo)
-	bytes, err = c.doRequest(ctx, uri, http.MethodPost, bytes)
+	bytes, err = c.doRequest(ctx, http.MethodPost, uri, bytes)
 	if err != nil {
 		return nil, err
 	}
@@ -254,21 +257,71 @@ func (c *Client) EmployeeUpdate(ctx context.Context, empNo int64, employeePartia
 	}
 	if !c.config.cacheDisabled {
 		if err := c.cache.EmployeesDelete(ctx, empNo); err != nil {
-			fmt.Printf("error while deleting employee (%d) from cache: %s\n", empNo, err)
+			c.Error(ctx, "error while deleting employee (%d) from cache: %s\n", empNo, err)
 		}
 	}
 	return response.Employee, nil
 }
 
-func (c *Client) EmployeeDelete(ctx context.Context, empNo int64) error {
+func (c *client) EmployeeDelete(ctx context.Context, empNo int64) error {
 	uri := fmt.Sprintf(c.address+data.RouteEmployeesEmpNof, empNo)
-	if _, err := c.doRequest(ctx, uri, http.MethodDelete, nil); err != nil {
+	if _, err := c.doRequest(ctx, http.MethodDelete, uri, nil); err != nil {
 		return err
 	}
 	if !c.config.cacheDisabled {
 		if err := c.cache.EmployeesDelete(ctx, empNo); err != nil {
-			fmt.Printf("error while deleting employee (%d) from cache: %s\n", empNo, err)
+			c.Error(ctx, "error while deleting employee (%d) from cache: %s\n", empNo, err)
 		}
+	}
+	return nil
+}
+
+func (c *client) CacheClear(ctx context.Context) error {
+	uri := fmt.Sprintf(c.address + data.RouteCache)
+	if _, err := c.doRequest(ctx, http.MethodDelete, uri, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *client) CacheCountersRead(ctx context.Context) (*data.CacheCounters, error) {
+	uri := fmt.Sprintf(c.address + data.RouteCacheCounters)
+	bytes, err := c.doRequest(ctx, http.MethodGet, uri, nil)
+	if err != nil {
+		return nil, err
+	}
+	response := &data.CacheCounters{}
+	if err := json.Unmarshal(bytes, response); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+func (c *client) CacheCountersClear(ctx context.Context) error {
+	uri := fmt.Sprintf(c.address + data.RouteCacheCounters)
+	if _, err := c.doRequest(ctx, http.MethodDelete, uri, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *client) TimersRead(ctx context.Context) (*data.Timers, error) {
+	uri := fmt.Sprintf(c.address + data.RouteTimers)
+	bytes, err := c.doRequest(ctx, http.MethodGet, uri, nil)
+	if err != nil {
+		return nil, err
+	}
+	response := &data.Timers{}
+	if err := json.Unmarshal(bytes, response); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+func (c *client) TimersClear(ctx context.Context) error {
+	uri := fmt.Sprintf(c.address + data.RouteTimers)
+	if _, err := c.doRequest(ctx, http.MethodDelete, uri, nil); err != nil {
+		return err
 	}
 	return nil
 }

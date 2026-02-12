@@ -1,6 +1,9 @@
 package data
 
 import (
+	"crypto/md5"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -38,4 +41,21 @@ func (e *EmployeeSearch) FromParams(params url.Values) {
 			}
 		}
 	}
+}
+
+func (e *EmployeeSearch) ToKey() (string, error) {
+	bytes, err := json.Marshal(e)
+	if err != nil {
+		return "", err
+	}
+	hash := md5.Sum(bytes)
+	return hex.EncodeToString(hash[:]), nil
+}
+
+func (e *EmployeeSearch) MarshalBinary() ([]byte, error) {
+	return json.Marshal(e)
+}
+
+func (e *EmployeeSearch) UnmarshalBinary(data []byte) error {
+	return json.Unmarshal(data, e)
 }
